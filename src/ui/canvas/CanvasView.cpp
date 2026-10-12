@@ -6,6 +6,7 @@
 #include "tools/LocalAlgorithms.h"
 #include <QApplication>
 #include <QDateTime>
+#include <QIconEngine>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QKeyEvent>
@@ -3006,17 +3007,188 @@ QStringList toolNames() {
             "Zoom"};
 }
 
-QIcon toolIcon(const QString &name, QColor color) {
-    if (!color.isValid())
-        color = qApp ? qApp->palette().color(QPalette::Text) : QColor("#FAFAFA");
-    QPixmap pixmap(44, 44);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.scale(2, 2);
-    QPen pen(color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-    painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
+namespace {
+// Layer panel glyphs use a "layer:" prefix so they never collide with tool names below.
+bool paintLayerGlyph(QPainter &painter, QPen pen, const QString &name, const QColor &color) {
+    if (name == "layer:eye") {
+        QPainterPath eye;
+        eye.moveTo(2, 11);
+        eye.cubicTo(5, 5.5, 17, 5.5, 20, 11);
+        eye.cubicTo(17, 16.5, 5, 16.5, 2, 11);
+        painter.drawPath(eye);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(11, 11), 2.4, 2.4);
+    } else if (name == "layer:lock") {
+        painter.drawRoundedRect(QRectF(5, 10, 12, 9), 1.5, 1.5);
+        painter.drawArc(QRectF(7.5, 4, 7, 10), 0, 180 * 16);
+        painter.drawLine(QPointF(7.5, 9), QPointF(7.5, 10));
+        painter.drawLine(QPointF(14.5, 9), QPointF(14.5, 10));
+    } else if (name == "layer:transparency") {
+        painter.drawRect(4, 4, 14, 14);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x)
+                painter.drawRect(QRectF(4 + x * 7 + (y % 2 ? 3.5 : 0), 4 + y * 7, 3.5, 3.5));
+        painter.drawRect(QRectF(7.5, 7.5, 3.5, 3.5));
+        painter.drawRect(QRectF(14.5, 7.5, 3.5, 3.5));
+        painter.drawRect(QRectF(4, 14.5, 3.5, 3.5));
+        painter.drawRect(QRectF(11, 14.5, 3.5, 3.5));
+    } else if (name == "layer:link") {
+        painter.drawRoundedRect(QRectF(2.5, 8, 9, 6), 3, 3);
+        painter.drawRoundedRect(QRectF(10.5, 8, 9, 6), 3, 3);
+    } else if (name == "layer:fx") {
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setItalic(true);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.drawText(QRectF(0, 0, 22, 22), Qt::AlignCenter, "fx");
+    } else if (name == "layer:mask") {
+        painter.drawRect(3, 5, 16, 12);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(11, 11), 3.5, 3.5);
+    } else if (name == "layer:adjustment") {
+        painter.drawEllipse(QPointF(11, 11), 7.5, 7.5);
+        QPainterPath half;
+        half.moveTo(11, 3.5);
+        half.arcTo(QRectF(3.5, 3.5, 15, 15), 90, 180);
+        half.closeSubpath();
+        painter.setBrush(color);
+        painter.drawPath(half);
+    } else if (name == "layer:folder") {
+        QPainterPath folder;
+        folder.moveTo(3, 6);
+        folder.lineTo(9, 6);
+        folder.lineTo(11, 8);
+        folder.lineTo(19, 8);
+        folder.lineTo(19, 17);
+        folder.lineTo(3, 17);
+        folder.closeSubpath();
+        painter.drawPath(folder);
+    } else if (name == "layer:new") {
+        painter.drawRect(4, 4, 14, 14);
+        painter.drawLine(11, 7.5, 11, 14.5);
+        painter.drawLine(7.5, 11, 14.5, 11);
+    } else if (name == "layer:trash") {
+        painter.drawLine(QPointF(4, 6), QPointF(18, 6));
+        painter.drawLine(QPointF(9, 6), QPointF(9.5, 3.5));
+        painter.drawLine(QPointF(9.5, 3.5), QPointF(12.5, 3.5));
+        painter.drawLine(QPointF(12.5, 3.5), QPointF(13, 6));
+        painter.drawPolyline(QPolygonF{{5.5, 6}, {6.5, 19}, {15.5, 19}, {16.5, 6}});
+        painter.drawLine(QPointF(9, 9), QPointF(9.3, 16));
+        painter.drawLine(QPointF(13, 9), QPointF(12.7, 16));
+    } else
+        return false;
+    Q_UNUSED(pen);
+    return true;
+}
+// Icons for the sixteen adjustments shown in the Adjustments panel ("adj:" + adjustment name).
+bool paintAdjustmentGlyph(QPainter &painter, const QString &name, const QColor &color) {
+    if (!name.startsWith("adj:"))
+        return false;
+    const QString kind = name.mid(4);
+    const QRectF box(4, 4, 14, 14);
+    if (kind == "Brightness/Contrast") {
+        painter.drawEllipse(QPointF(11, 11), 4, 4);
+        QPainterPath half;
+        half.moveTo(11, 7);
+        half.arcTo(QRectF(7, 7, 8, 8), 90, 180);
+        half.closeSubpath();
+        painter.fillPath(half, color);
+        for (int i = 0; i < 8; ++i) {
+            const qreal a = i * std::numbers::pi / 4;
+            painter.drawLine(QPointF(11 + 6.5 * std::cos(a), 11 + 6.5 * std::sin(a)),
+                             QPointF(11 + 8.5 * std::cos(a), 11 + 8.5 * std::sin(a)));
+        }
+    } else if (kind == "Levels") {
+        painter.drawLine(QPointF(3, 18.5), QPointF(19, 18.5));
+        const qreal heights[] = {3, 7, 11, 8, 12, 6, 3};
+        for (int i = 0; i < 7; ++i)
+            painter.drawLine(QPointF(5 + i * 2, 18.5), QPointF(5 + i * 2, 18.5 - heights[i]));
+    } else if (kind == "Curves") {
+        painter.drawRect(box);
+        QPainterPath curve;
+        curve.moveTo(4, 18);
+        curve.cubicTo(10, 18, 12, 4, 18, 4);
+        painter.drawPath(curve);
+    } else if (kind == "Exposure") {
+        painter.drawRect(box);
+        painter.drawLine(QPointF(4, 18), QPointF(18, 4));
+        painter.drawLine(QPointF(6.5, 8.5), QPointF(10.5, 8.5));
+        painter.drawLine(QPointF(8.5, 6.5), QPointF(8.5, 10.5));
+        painter.drawLine(QPointF(11.5, 14.5), QPointF(15.5, 14.5));
+    } else if (kind == "Vibrance") {
+        painter.drawPolygon(QPolygonF{{3.5, 5}, {18.5, 5}, {11, 18}});
+        painter.drawLine(QPointF(7.5, 9), QPointF(14.5, 9));
+    } else if (kind == "Hue/Saturation") {
+        for (int i = 0; i < 3; ++i) {
+            const qreal y = 6 + i * 5;
+            painter.drawLine(QPointF(3, y), QPointF(19, y));
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(i == 1 ? 14 : i == 0 ? 8 : 11, y), 1.8, 1.8);
+            painter.setBrush(Qt::NoBrush);
+        }
+    } else if (kind == "Color Balance") {
+        painter.drawLine(QPointF(11, 4), QPointF(11, 18));
+        painter.drawLine(QPointF(7, 18), QPointF(15, 18));
+        painter.drawLine(QPointF(4, 7), QPointF(18, 7));
+        painter.drawArc(QRectF(2, 8, 6, 6), 180 * 16, 180 * 16);
+        painter.drawArc(QRectF(14, 8, 6, 6), 180 * 16, 180 * 16);
+    } else if (kind == "Black & White") {
+        painter.drawRect(box);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{{4, 18}, {18, 4}, {18, 18}});
+    } else if (kind == "Photo Filter") {
+        painter.drawRoundedRect(QRectF(3, 7, 16, 11), 2, 2);
+        painter.drawPolyline(QPolygonF{{8, 7}, {9.5, 4.5}, {12.5, 4.5}, {14, 7}});
+        painter.drawEllipse(QPointF(11, 12.5), 3, 3);
+    } else if (kind == "Channel Mixer") {
+        painter.drawEllipse(QPointF(11, 8), 4.5, 4.5);
+        painter.drawEllipse(QPointF(8, 13.5), 4.5, 4.5);
+        painter.drawEllipse(QPointF(14, 13.5), 4.5, 4.5);
+    } else if (kind == "Color Lookup") {
+        painter.drawRect(box);
+        for (const qreal at : {8.67, 13.33}) {
+            painter.drawLine(QPointF(at, 4), QPointF(at, 18));
+            painter.drawLine(QPointF(4, at), QPointF(18, at));
+        }
+    } else if (kind == "Invert") {
+        painter.drawRect(box);
+        painter.fillRect(QRectF(4, 4, 7, 14), color);
+        painter.drawEllipse(QPointF(11, 11), 3.5, 3.5);
+    } else if (kind == "Posterize") {
+        painter.drawPolyline(
+            QPolygonF{{3, 19}, {3, 15}, {7, 15}, {7, 11}, {11, 11}, {11, 7}, {15, 7}, {15, 3}, {19, 3}});
+    } else if (kind == "Threshold") {
+        painter.drawRect(box);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{{4, 18}, {4, 13}, {8, 9}, {11, 13}, {14, 8}, {18, 12}, {18, 18}});
+    } else if (kind == "Gradient Map") {
+        QLinearGradient gradient(4, 0, 18, 0);
+        QColor clear = color;
+        clear.setAlphaF(0);
+        gradient.setColorAt(0, clear);
+        gradient.setColorAt(1, color);
+        painter.fillRect(box, gradient);
+        painter.drawRect(box);
+    } else if (kind == "Selective Color") {
+        painter.drawEllipse(QPointF(11, 11), 7.5, 7.5);
+        for (int i = 0; i < 3; ++i) {
+            const qreal a = i * std::numbers::pi / 3;
+            painter.drawLine(QPointF(11 - 7.5 * std::cos(a), 11 - 7.5 * std::sin(a)),
+                             QPointF(11 + 7.5 * std::cos(a), 11 + 7.5 * std::sin(a)));
+        }
+    } else {
+        painter.drawRect(box);
+    }
+    return true;
+}
+void paintToolGlyph(QPainter &painter, QPen pen, const QString &name, const QColor &color) {
+    if (paintLayerGlyph(painter, pen, name, color))
+        return;
+    if (paintAdjustmentGlyph(painter, name, color))
+        return;
     if (name == "Move" || name == "Content-Aware Move") {
         painter.drawLine(11, 3, 11, 19);
         painter.drawLine(3, 11, 19, 11);
@@ -3199,7 +3371,51 @@ QIcon toolIcon(const QString &name, QColor color) {
             painter.drawLine(4, 5, 4, 9);
         }
     }
-    painter.end();
-    return QIcon(pixmap);
+}
+// Draws the glyph as vectors at whatever size and device pixel ratio the widget requests, so
+// icons stay sharp at fractional display scaling instead of resampling a fixed bitmap.
+class GlyphIconEngine final : public QIconEngine {
+  public:
+    GlyphIconEngine(QString name, QColor color) : m_name(std::move(name)), m_color(std::move(color)) {}
+    void paint(QPainter *painter, const QRect &rect, QIcon::Mode mode, QIcon::State) override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setRenderHint(QPainter::TextAntialiasing);
+        const qreal side = std::min(rect.width(), rect.height());
+        painter->translate(rect.x() + (rect.width() - side) / 2.0, rect.y() + (rect.height() - side) / 2.0);
+        painter->scale(side / 22.0, side / 22.0);
+        QColor color = m_color;
+        if (mode == QIcon::Disabled)
+            color.setAlphaF(color.alphaF() * 0.35);
+        QPen pen(color, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter->setPen(pen);
+        painter->setBrush(Qt::NoBrush);
+        paintToolGlyph(*painter, pen, m_name, color);
+        painter->restore();
+    }
+    QSize actualSize(const QSize &size, QIcon::Mode, QIcon::State) override { return size; }
+    QPixmap pixmap(const QSize &size, QIcon::Mode mode, QIcon::State state) override {
+        return scaledPixmap(size, mode, state, 1.0);
+    }
+    QPixmap scaledPixmap(const QSize &size, QIcon::Mode mode, QIcon::State state, qreal scale) override {
+        QPixmap pixmap((QSizeF(size) * scale).toSize());
+        pixmap.setDevicePixelRatio(scale);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        paint(&painter, QRect(QPoint(), size), mode, state);
+        return pixmap;
+    }
+    QIconEngine *clone() const override { return new GlyphIconEngine(m_name, m_color); }
+    QString key() const override { return QStringLiteral("SerikaGlyph"); }
+
+  private:
+    QString m_name;
+    QColor m_color;
+};
+} // namespace
+QIcon toolIcon(const QString &name, QColor color) {
+    if (!color.isValid())
+        color = qApp ? qApp->palette().color(QPalette::Text) : QColor("#FAFAFA");
+    return QIcon(new GlyphIconEngine(name, color));
 }
 } // namespace serika

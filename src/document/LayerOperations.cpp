@@ -620,7 +620,10 @@ LayerOperationResult reparentLayers(Document *document, const QVector<quint64> &
         tree.children[parentId].insert(index++, id);
     if (tree.children == before.children)
         return {false, roots, {}};
-    commit(document, "Move layers into group", tree, activeId(document));
+    const bool reparented = std::any_of(roots.cbegin(), roots.cend(), [&](quint64 id) {
+        return before.layers[id].parentId != parentId;
+    });
+    commit(document, reparented ? "Move layers into group" : "Reorder layers", tree, activeId(document));
     return {true, roots, {}};
 }
 LayerOperationResult applyLayerTree(Document *document, const QVector<LayerPlacement> &placements,

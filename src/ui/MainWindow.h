@@ -97,6 +97,8 @@ class MainWindow : public QMainWindow {
     QSettings m_settings;
     QByteArray m_essentialState;
     QHash<QString, bool> m_visibilityBeforeHide;
+    // Layer visibility saved by Alt-clicking an eye, keyed by document address and soloed layer id.
+    QHash<QString, QHash<quint64, bool>> m_soloVisibility;
     QPointer<QWidget> m_draggedPage;
     void detachDocument(int index);
     void buildMenus();

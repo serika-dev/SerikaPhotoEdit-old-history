@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "ui/panels/LayerTree.h"
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
@@ -15,6 +16,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QTreeWidgetItemIterator>
 #include <QtTest>
 
 using namespace serika;
@@ -28,6 +30,25 @@ class UiTests : public QObject {
         QTest::qWait(20);
         window.setWorkspace("Essentials", true);
         QCoreApplication::processEvents();
+    }
+    static QTreeWidgetItem *itemFor(QTreeWidget *tree, quint64 id) {
+        for (QTreeWidgetItemIterator it(tree); *it; ++it)
+            if (LayerTree::idOf(*it) == id)
+                return *it;
+        return nullptr;
+    }
+    static QPoint eyePoint(QTreeWidget *tree, quint64 id) {
+        auto *item = itemFor(tree, id);
+        return item ? QPoint(tree->columnViewportPosition(LayerTree::EyeColumn) + tree->columnWidth(0) / 2,
+                             tree->visualItemRect(item).center().y())
+                    : QPoint();
+    }
+    static QVector<quint64> stack(const Document *doc, quint64 parent = 0) {
+        QVector<quint64> ids; // bottom-to-top
+        for (const auto &layer : doc->state.layers)
+            if (layer.parentId == parent)
+                ids.append(layer.id);
+        return ids;
     }
   private slots:
     void initTestCase() {
@@ -195,9 +216,16 @@ class UiTests : public QObject {
         QVERIFY(tree);
         QTRY_VERIFY(tree->topLevelItemCount() > 1);
         QTRY_COMPARE(tree->topLevelItem(0)->data(1, Qt::UserRole).toULongLong(), topId);
-        QTreeWidgetItem *top = tree->topLevelItem(0);
-        // The panel's itemChanged signal must update the document and record an undo step.
-        top->setCheckState(0, Qt::Unchecked);
+        // Clicking the eye hides the layer, clicking the empty eye cell shows it again.
+        const int historyBefore = doc->historyNames().size();
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, eyePoint(tree, topId));
+        QVERIFY(!doc->state.layers[doc->indexForId(topId)].visible);
+        QTRY_VERIFY(itemFor(tree, topId) && itemFor(tree, topId)->icon(0).isNull());
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, eyePoint(tree, topId));
+        QVERIFY(doc->state.layers[doc->indexForId(topId)].visible);
+        QTRY_VERIFY(itemFor(tree, topId) && !itemFor(tree, topId)->icon(0).isNull());
+        QCOMPARE(doc->historyNames().size(), historyBefore + 2);
+        window.runCommand("Undo");
         QVERIFY(!doc->state.layers[doc->indexForId(topId)].visible);
         window.runCommand("Undo");
         QVERIFY(doc->state.layers[doc->indexForId(topId)].visible);
@@ -206,6 +234,121 @@ class UiTests : public QObject {
         QCOMPARE(doc->indexForId(topId), original - 1);
         window.runCommand("Undo");
         QCOMPARE(doc->indexForId(topId), original);
+    }
+    void eyeStrokeAndSoloFollowPhotoshop() {
+        MainWindow window;
+        show(window);
+        window.openDemo();
+        Document *doc = window.currentDocument();
+        doc->resizeImage({160, 100}, Qt::FastTransformation);
+        auto *tree = window.findChild<QTreeWidget *>("layersTree");
+        QTRY_VERIFY(tree->topLevelItemCount() > 2);
+        const quint64 first = LayerTree::idOf(tree->topLevelItem(0));
+        const quint64 second = LayerTree::idOf(tree->topLevelItem(1));
+        const quint64 third = LayerTree::idOf(tree->topLevelItem(2));
+        // Dragging down the eye column hides every row crossed, in a single history step.
+        const int historyBefore = doc->historyNames().size();
+        QTest::mousePress(tree->viewport(), Qt::LeftButton, {}, eyePoint(tree, first));
+        QTest::mouseMove(tree->viewport(), eyePoint(tree, second));
+        QTest::mouseMove(tree->viewport(), eyePoint(tree, third));
+        QTest::mouseRelease(tree->viewport(), Qt::LeftButton, {}, eyePoint(tree, third));
+        for (auto id : {first, second, third})
+            QVERIFY(!doc->state.layers[doc->indexForId(id)].visible);
+        QCOMPARE(doc->historyNames().size(), historyBefore + 1);
+        window.runCommand("Undo");
+        for (auto id : {first, second, third})
+            QVERIFY(doc->state.layers[doc->indexForId(id)].visible);
+        // Alt-click shows only that layer; Alt-click again restores the previous visibility.
+        doc->mutate("Hide", [&] { doc->state.layers[doc->indexForId(third)].visible = false; });
+        QTRY_VERIFY(itemFor(tree, second) && itemFor(tree, third)->icon(0).isNull());
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::AltModifier, eyePoint(tree, second));
+        for (const auto &layer : doc->state.layers)
+            QCOMPARE(layer.visible, layer.id == second);
+        QTRY_VERIFY(itemFor(tree, first) && itemFor(tree, first)->icon(0).isNull());
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::AltModifier, eyePoint(tree, second));
+        QVERIFY(doc->state.layers[doc->indexForId(first)].visible);
+        QVERIFY(!doc->state.layers[doc->indexForId(third)].visible);
+        // Clicking an eye never selects the row or opens the rename editor.
+        doc->setActiveIndex(doc->indexForId(first));
+        QTRY_VERIFY(itemFor(tree, third) && !itemFor(tree, first)->icon(0).isNull());
+        QTest::mouseDClick(tree->viewport(), Qt::LeftButton, {}, eyePoint(tree, third));
+        QCOMPARE(doc->activeLayer()->id, first);
+    }
+    void dragDropReordersAndNestsLayers() {
+        MainWindow window;
+        show(window);
+        window.openDemo();
+        Document *doc = window.currentDocument();
+        doc->resizeImage({160, 100}, Qt::FastTransformation);
+        auto *tree = static_cast<LayerTree *>(window.findChild<QTreeWidget *>("layersTree"));
+        QTRY_VERIFY(tree->topLevelItemCount() > 2);
+        const auto drop = [&](QVector<quint64> ids, quint64 target, LayerTree::DropPlacement placement) {
+            tree->layersDropped(ids, target, placement);
+            QCoreApplication::processEvents();
+        };
+        auto top = stack(doc);
+        const quint64 bottom = top.first(), highest = top.last();
+        // Dragging the bottom layer above the top layer moves it to the top of the stack.
+        drop({bottom}, highest, LayerTree::DropPlacement::Above);
+        QCOMPARE(stack(doc).last(), bottom);
+        QCOMPARE(doc->historyNames().last(), QString("Reorder layers"));
+        // Dropping below a layer places it directly underneath.
+        drop({bottom}, highest, LayerTree::DropPlacement::Below);
+        top = stack(doc);
+        QCOMPARE(top[top.size() - 2], bottom);
+        QCOMPARE(top.last(), highest);
+        // Dropping onto empty space sends it to the bottom.
+        drop({bottom}, 0, LayerTree::DropPlacement::Bottom);
+        QCOMPARE(stack(doc).first(), bottom);
+        window.runCommand("Undo");
+        top = stack(doc);
+        QCOMPARE(top[top.size() - 2], bottom);
+        // Groups accept drops onto the row; ordinary layers never adopt children.
+        doc->setActiveIndex(doc->indexForId(highest));
+        window.runCommand("Group Layers");
+        quint64 group = 0;
+        for (const auto &layer : doc->state.layers)
+            if (layer.kind == LayerKind::Group)
+                group = layer.id;
+        QVERIFY(group);
+        drop({bottom}, group, LayerTree::DropPlacement::Inside);
+        QCOMPARE(doc->state.layers[doc->indexForId(bottom)].parentId, group);
+        QCOMPARE(stack(doc, group).last(), bottom);
+        const quint64 other = stack(doc).first();
+        drop({other}, bottom, LayerTree::DropPlacement::Inside);
+        QCOMPARE(doc->state.layers[doc->indexForId(other)].parentId, group);
+        QCOMPARE(doc->state.layers[doc->indexForId(bottom)].parentId, group);
+        QTRY_VERIFY(itemFor(tree, bottom) && itemFor(tree, bottom)->parent());
+        QVERIFY(!(itemFor(tree, bottom)->flags() & Qt::ItemIsDropEnabled));
+        QVERIFY(itemFor(tree, group)->flags() & Qt::ItemIsDropEnabled);
+        // Dropping a group inside its own child is refused without changing anything.
+        const auto before = doc->historyNames().size();
+        drop({group}, bottom, LayerTree::DropPlacement::Above);
+        QCOMPARE(doc->historyNames().size(), before);
+        // If the platform reports a refused drop as a move, Qt deletes the dragged row itself;
+        // the end of every drag rebuilds the panel so the row comes back.
+        delete itemFor(tree, other);
+        QVERIFY(!itemFor(tree, other));
+        tree->dragFinished();
+        QTRY_VERIFY(itemFor(tree, other));
+    }
+    void layerPanelUsesIconsNotLetters() {
+        MainWindow window;
+        show(window);
+        window.openDemo();
+        for (const auto &name : QStringList{"fx", "mask", "adjustment", "folder", "new", "trash"}) {
+            auto *button = window.findChild<QToolButton *>("layerFooter_" + name);
+            QVERIFY2(button && !button->icon().isNull() && button->text().isEmpty(), qPrintable(name));
+        }
+        for (const auto &name : QStringList{"lockAlpha", "lockPixels", "lockPosition"})
+            QVERIFY(!window.findChild<QToolButton *>(name)->icon().isNull());
+        for (const auto &name : adjustmentNames().mid(0, 16)) {
+            auto *button = window.findChild<QToolButton *>("adjustment_" + name);
+            QVERIFY2(button && !button->icon().isNull(), qPrintable(name));
+        }
+        // Icons are drawn as vectors at the requested scale rather than resampled from one bitmap.
+        const QPixmap crisp = toolIcon("layer:eye").pixmap(QSize(16, 16), 1.5);
+        QCOMPARE(crisp.size(), QSize(24, 24));
     }
     void primaryShortcutsAndToolButtonsAreRegistered() {
         MainWindow window;
