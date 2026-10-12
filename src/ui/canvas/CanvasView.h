@@ -245,4 +245,6 @@ class CanvasView : public QWidget {
 };
 QStringList toolNames();
 QIcon toolIcon(const QString &name, QColor color = QColor());
+// The tool glyph with a corner triangle marking a toolbar slot that holds more tools.
+QIcon toolGroupIcon(const QString &name, QColor color = QColor());
 } // namespace serika

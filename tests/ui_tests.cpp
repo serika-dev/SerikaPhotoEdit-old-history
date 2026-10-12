@@ -81,7 +81,11 @@ class UiTests : public QObject {
         window.openDemo();
         window.setWorkspace("Essentials", true);
         QCoreApplication::processEvents();
-        const QStringList order{"Color", "Adjustments", "Layers", "Properties"};
+        // Photoshop's Essentials: three stacks, with Properties as a tab beside Adjustments.
+        const QStringList order{"Color", "Adjustments", "Layers"};
+        auto *adjustments = window.findChild<QDockWidget *>("panel_Adjustments");
+        QVERIFY(window.tabifiedDockWidgets(adjustments)
+                    .contains(window.findChild<QDockWidget *>("panel_Properties")));
         for (const QString &name : order)
             QVERIFY(window.findChild<QDockWidget *>("panel_" + name)->isVisible());
         for (int i = 1; i < order.size(); ++i) {

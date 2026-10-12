@@ -23,6 +23,7 @@
 #include <QFileSystemModel>
 #include <QFontComboBox>
 #include <QFormLayout>
+#include <QGraphicsDropShadowEffect>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -63,6 +64,49 @@ static void setGlyph(QToolButton *button, const QString &glyph, int iconSize) {
     button->setIconSize(QSize(iconSize, iconSize));
     button->setAutoRaise(true);
 }
+// Sidebar slots holding several tools show Photoshop's corner triangle.
+static QIcon sidebarIcon(const QToolButton *button, const QString &tool) {
+    return button->menu() ? toolGroupIcon(tool) : toolIcon(tool);
+}
+// Foreground and background swatches overlapping, as in Photoshop's toolbar.
+static QIcon colorChipsIcon(const QColor &foreground, const QColor &background) {
+    const qreal ratio = qApp->devicePixelRatio();
+    QPixmap pixmap(QSize(30, 30) * ratio);
+    pixmap.setDevicePixelRatio(ratio);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    const QColor edge = qApp->palette().color(QPalette::Text);
+    const auto chip = [&](const QRectF &rect, const QColor &color) {
+        painter.setPen(QPen(qApp->palette().color(QPalette::Window), 2));
+        painter.setBrush(color);
+        painter.drawRoundedRect(rect, 3, 3);
+        painter.setPen(QPen(edge, 1));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 2.5, 2.5);
+    };
+    chip(QRectF(11, 11, 17, 17), background);
+    chip(QRectF(2, 2, 17, 17), foreground);
+    return QIcon(pixmap);
+}
+// Keeps an overlay placed when the widget it floats over is resized.
+class ResizeHook final : public QObject {
+  public:
+    ResizeHook(QWidget *target, std::function<void()> onResize)
+        : QObject(target), m_onResize(std::move(onResize)) {
+        target->installEventFilter(this);
+    }
+
+  protected:
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::Resize)
+            m_onResize();
+        return false;
+    }
+
+  private:
+    std::function<void()> m_onResize;
+};
 // Layer rows draw every icon at the tree's 42x30 thumbnail size, so small glyphs are placed
 // centred within their narrow column on a transparent pixmap of that size.
 static QIcon layerCellIcon(const QString &glyph, int glyphSize, int columnWidth) {
@@ -744,8 +788,8 @@ void MainWindow::buildTools() {
     v->setContentsMargins(3, 0, 3, 4);
     v->setSpacing(1);
     auto *chevron = new QToolButton;
-    chevron->setText(m_twoColumns ? "‹" : "»");
-    chevron->setFixedHeight(16);
+    setGlyph(chevron, m_twoColumns ? "ui:collapse" : "ui:expand", 12);
+    chevron->setFixedSize(m_twoColumns ? 66 : 32, 16);
     chevron->setToolTip("Toggle toolbar columns");
     v->addWidget(chevron);
     connect(chevron, &QToolButton::clicked, this, [this] {
@@ -763,17 +807,16 @@ void MainWindow::buildTools() {
         b->setObjectName("tool_" + g.second.first());
         b->setCheckable(true);
         b->setProperty("iconTool", g.second.first());
-        b->setIcon(toolIcon(g.second.first()));
-        b->setIconSize(QSize(18, 18));
-        b->setFixedSize(30, 27);
-        b->setStyleSheet("QToolButton {padding:2px;border-radius:2px;}");
+        b->setIconSize(QSize(20, 20));
+        b->setFixedSize(32, 30);
+        b->setAutoRaise(true);
         b->setToolTip(g.second.join(" / ") + (g.first.isEmpty() ? QString() : " (" + g.first + ")"));
         auto *menu = new QMenu(b);
         for (const auto &name : g.second) {
             auto *a = menu->addAction(toolIcon(name), name);
             connect(a, &QAction::triggered, this, [this, b, name] {
                 b->setProperty("iconTool", name);
-                b->setIcon(toolIcon(name));
+                b->setIcon(sidebarIcon(b, name));
                 selectTool(name);
             });
             m_tools[name] = b;
@@ -782,6 +825,7 @@ void MainWindow::buildTools() {
             b->setMenu(menu);
             b->setPopupMode(QToolButton::DelayedPopup);
         }
+        b->setIcon(sidebarIcon(b, g.second.first()));
         connect(b, &QToolButton::clicked, this, [this, b, g] {
             QString chosen = g.second.first();
             if (g.second.contains(m_tool) && m_tools[m_tool] == b)
@@ -794,34 +838,38 @@ void MainWindow::buildTools() {
     v->addLayout(grid);
     v->addStretch();
     auto *colors = new QToolButton;
-    colors->setFixedSize(m_twoColumns ? 62 : 30, 36);
+    colors->setObjectName("colorChips");
+    colors->setProperty("iconButton", true);
+    colors->setAutoRaise(true);
+    colors->setFixedSize(32, 34);
+    colors->setIconSize(QSize(30, 30));
+    colors->setIcon(colorChipsIcon(m_foreground, m_background));
     colors->setToolTip("Foreground / background colors (X swaps, D resets)");
-    colors->setStyleSheet("background:" + m_foreground.name() + ";border:3px solid " + m_background.name() +
-                          ";");
-    v->addWidget(colors);
+    v->addWidget(colors, 0, Qt::AlignHCenter);
     connect(colors, &QToolButton::clicked, this, [this, colors] {
         auto c =
             QColorDialog::getColor(m_foreground, this, "Foreground color", QColorDialog::ShowAlphaChannel);
         if (c.isValid()) {
             m_foreground = c;
-            colors->setStyleSheet("background:" + c.name() + ";border:3px solid " + m_background.name() +
-                                  ";");
+            colors->setIcon(colorChipsIcon(m_foreground, m_background));
             selectTool(m_tool);
         }
     });
     auto *quick = new QToolButton;
-    quick->setText("◉");
+    setGlyph(quick, "ui:quick-mask", 18);
+    quick->setFixedSize(32, 28);
     quick->setToolTip("Quick Mask (Q)");
-    v->addWidget(quick);
+    v->addWidget(quick, 0, Qt::AlignHCenter);
     connect(quick, &QToolButton::clicked, this, [this] {
         m_quickMask = !m_quickMask;
         if (auto *c = currentCanvas())
             c->setQuickMask(m_quickMask);
     });
     auto *screen = new QToolButton;
-    screen->setText("▣");
+    setGlyph(screen, "ui:screen-mode", 18);
+    screen->setFixedSize(32, 28);
     screen->setToolTip("Screen Mode (F)");
-    v->addWidget(screen);
+    v->addWidget(screen, 0, Qt::AlignHCenter);
     connect(screen, &QToolButton::clicked, this, [this] { runCommand("Screen Mode"); });
     updateShortcutLabels();
 }
@@ -932,6 +980,7 @@ void MainWindow::buildLayers(QWidget *parent) {
     m_layers->setRootIsDecorated(true);
     m_layers->setTreePosition(1);
     m_layers->setUniformRowHeights(true);
+    m_layers->setMinimumHeight(120);
     m_layers->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_layers->setDragDropMode(QAbstractItemView::InternalMove);
     m_layers->setDefaultDropAction(Qt::MoveAction);
@@ -1223,7 +1272,13 @@ void MainWindow::buildDocks() {
         }
         v->addLayout(grid);
         v->addStretch();
-        dock(name, w);
+        // Scrolling keeps the preset grids from setting a tall minimum on the panels they share.
+        auto *scroll = new QScrollArea;
+        scroll->setWidget(w);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setMinimumHeight(60);
+        dock(name, scroll);
     }
     m_docks["Color"]->raise();
     auto *adjustments = new QWidget;
@@ -1253,6 +1308,8 @@ void MainWindow::buildDocks() {
     av->addWidget(more, ai / 8 + 1, 0, 1, 8, Qt::AlignLeft);
     av->setRowStretch(ai / 8 + 2, 1);
     av->setColumnStretch(8, 1);
+    // Never let a short panel crush the icon buttons into slivers.
+    adjustments->setMinimumHeight(adjustments->sizeHint().height());
     dock("Adjustments", adjustments, true);
     m_docks["Adjustments"]->raise();
     auto *layers = new QWidget;
@@ -1518,7 +1575,9 @@ void MainWindow::buildDocks() {
         removeDockWidget(panel);
         panel->hide();
     }
-    const QStringList primary = {"Color", "Adjustments", "Layers", "Properties"};
+    // Three stacks, as in Photoshop's Essentials: Color, Adjustments with Properties, and Layers,
+    // so the Layers list keeps its room on short screens.
+    const QStringList primary = {"Color", "Adjustments", "Layers"};
     QDockWidget *previous = nullptr;
     for (const auto &name : primary) {
         auto *panel = m_docks[name];
@@ -1529,7 +1588,8 @@ void MainWindow::buildDocks() {
         previous = panel;
     }
     const QHash<QString, QString> companions = {{"Swatches", "Color"},     {"Gradients", "Color"},
-                                                {"Styles", "Adjustments"}, {"Brush Settings", "Adjustments"},
+                                                {"Styles", "Adjustments"}, {"Properties", "Adjustments"},
+                                                {"Brush Settings", "Adjustments"},
                                                 {"Channels", "Layers"},    {"Paths", "Layers"}};
     for (auto it = m_docks.begin(); it != m_docks.end(); ++it) {
         if (primary.contains(it.key()))
@@ -1542,8 +1602,7 @@ void MainWindow::buildDocks() {
     }
     for (const auto &name : primary)
         m_docks[name]->raise();
-    resizeDocks({m_docks["Color"], m_docks["Adjustments"], m_docks["Layers"], m_docks["Properties"]},
-                {190, 150, 365, 190}, Qt::Vertical);
+    resizeDocks({m_docks["Color"], m_docks["Adjustments"], m_docks["Layers"]}, {190, 190, 520}, Qt::Vertical);
     resizeDocks({m_docks["Layers"]}, {278}, Qt::Horizontal);
 }
 void MainWindow::selectTool(const QString &tool) {
@@ -1556,8 +1615,10 @@ void MainWindow::selectTool(const QString &tool) {
     if (m_tools.contains(tool)) {
         m_tools[tool]->setChecked(true);
         m_tools[tool]->setProperty("iconTool", tool);
-        m_tools[tool]->setIcon(toolIcon(tool));
+        m_tools[tool]->setIcon(sidebarIcon(m_tools[tool], tool));
     }
+    if (auto *chips = m_toolWidget ? m_toolWidget->findChild<QToolButton *>("colorChips") : nullptr)
+        chips->setIcon(colorChipsIcon(m_foreground, m_background));
     m_options->findChild<QLabel *>("toolLabel")->setText(tool);
     bool paint = QStringList{"Brush",         "Pencil",
                              "Mixer Brush",   "Color Replacement",
@@ -1648,23 +1709,52 @@ void MainWindow::addDocument(Document *document) {
     hint->setText("Space: pan   ·   Alt: sample   ·   [ ]: brush size");
     h->addWidget(hint);
     v->addWidget(status);
+    // Floating contextual task bar, like Photoshop's: flat icon-and-label actions in a soft pill
+    // centred near the bottom of the canvas, away from the top edge of the image.
     auto *context = new QFrame(canvas);
     context->setObjectName("contextBar");
+    auto *shadow = new QGraphicsDropShadowEffect(context);
+    shadow->setBlurRadius(22);
+    shadow->setOffset(0, 4);
+    shadow->setColor(QColor(0, 0, 0, 90));
+    context->setGraphicsEffect(shadow);
     auto *ch = new QHBoxLayout(context);
-    ch->setContentsMargins(7, 5, 7, 5);
-    ch->setSpacing(4);
-    for (const auto &pair : QList<QPair<QString, QString>>{{"Select subject", "Subject"},
-                                                           {"Remove background", "Remove Background"},
-                                                           {"Add mask", "Add Layer Mask"},
-                                                           {"Invert", "Inverse"},
-                                                           {"Deselect", "Deselect"}}) {
-        auto *b = button(pair.first, context, [this, pair] { runCommand(pair.second); });
-        b->setObjectName("context_" + pair.second);
+    ch->setContentsMargins(5, 4, 5, 4);
+    ch->setSpacing(2);
+    struct ContextAction {
+        QString label, command, glyph;
+    };
+    for (const auto &action : QList<ContextAction>{{"Select subject", "Subject", "ctx:subject"},
+                                                   {"Remove background", "Remove Background",
+                                                    "ctx:remove-background"},
+                                                   {"Invert", "Inverse", "ctx:invert"},
+                                                   {"Deselect", "Deselect", "ctx:deselect"},
+                                                   {"Add mask", "Add Layer Mask", "layer:mask"}}) {
+        if (action.command == "Add Layer Mask") {
+            auto *separator = new QFrame(context);
+            separator->setObjectName("contextSeparator");
+            separator->setFixedSize(1, 18);
+            ch->addWidget(separator);
+        }
+        auto *b = new QToolButton(context);
+        b->setObjectName("context_" + action.command);
+        b->setText(action.label);
+        b->setProperty("glyph", action.glyph);
+        b->setIcon(toolIcon(action.glyph));
+        b->setIconSize(QSize(16, 16));
+        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        b->setCursor(Qt::PointingHandCursor);
+        connect(b, &QToolButton::clicked, this, [this, command = action.command] { runCommand(command); });
         ch->addWidget(b);
     }
-    context->adjustSize();
-    context->move(36, 30);
-    auto update = [this, document, page, canvas, label, zoom, context] {
+    const auto placeContext = [context, canvas] {
+        context->adjustSize();
+        context->move(std::max(12, (canvas->width() - context->width()) / 2),
+                      std::max(12, canvas->height() - context->height() - 26));
+    };
+    new ResizeHook(canvas, placeContext);
+    placeContext();
+    auto update = [this, document, page, canvas, label, zoom, context, placeContext] {
         int index = m_tabs->indexOf(page);
         if (index >= 0)
             m_tabs->setTabText(index, document->title + (document->isModified() ? " *" : ""));
@@ -1677,12 +1767,11 @@ void MainWindow::addDocument(Document *document) {
                            .arg(document->state.resolution));
         zoom->setText(QString::number(canvas->zoom() * 100, 'f', 1) + "%");
         bool selected = document->hasSelection();
-        context->findChild<QPushButton *>("context_Inverse")->setVisible(selected);
-        context->findChild<QPushButton *>("context_Deselect")->setVisible(selected);
-        context->findChild<QPushButton *>("context_Subject")->setVisible(!selected);
-        context->findChild<QPushButton *>("context_Remove Background")->setVisible(!selected);
-        context->adjustSize();
-        context->move(std::max(24, (canvas->width() - context->width()) / 2), 30);
+        context->findChild<QToolButton *>("context_Inverse")->setVisible(selected);
+        context->findChild<QToolButton *>("context_Deselect")->setVisible(selected);
+        context->findChild<QToolButton *>("context_Subject")->setVisible(!selected);
+        context->findChild<QToolButton *>("context_Remove Background")->setVisible(!selected);
+        placeContext();
         if (currentDocument() == document) {
             m_commands["Undo"]->setEnabled(document->canUndo());
             m_commands["Redo"]->setEnabled(document->canRedo());
@@ -2016,7 +2105,7 @@ void MainWindow::applyTheme(const QString &name) {
             const auto iconName = tool->property("iconTool").toString();
             if (iconName.isEmpty())
                 continue;
-            tool->setIcon(toolIcon(iconName));
+            tool->setIcon(sidebarIcon(tool, iconName));
             if (tool->menu())
                 for (auto *action : tool->menu()->actions())
                     action->setIcon(toolIcon(action->text()));
@@ -2040,7 +2129,9 @@ void MainWindow::setWorkspace(const QString &name, bool reset) {
         QFile f(file);
         if (f.open(QIODevice::ReadOnly)) {
             auto obj = QJsonDocument::fromJson(f.readAll()).object();
-            if (obj["schema"].toInt() == 3 &&
+            // Schema 5: layouts saved before the three-stack, icon-based panels are dropped
+            // once, because their panel heights no longer fit the new contents.
+            if (obj["schema"].toInt() == 5 &&
                 restoreState(QByteArray::fromBase64(obj["layout"].toString().toLatin1()), 1)) {
                 m_toolDock->setVisible(bool(currentDocument()));
                 m_options->setVisible(bool(currentDocument()));
@@ -2087,9 +2178,8 @@ void MainWindow::setWorkspace(const QString &name, bool reset) {
     }
     if (currentDocument())
         QTimer::singleShot(0, this, [this] {
-            resizeDocks({m_docks["Color"], m_docks["Adjustments"], m_docks["Layers"], m_docks["Properties"]},
-                        m_workspace == "Painting" ? QList<int>{170, 400, 300, 140}
-                                                  : QList<int>{200, 110, 500, 150},
+            resizeDocks({m_docks["Color"], m_docks["Adjustments"], m_docks["Layers"]},
+                        m_workspace == "Painting" ? QList<int>{170, 400, 330} : QList<int>{200, 180, 520},
                         Qt::Vertical);
         });
     m_toolDock->setVisible(bool(currentDocument()));
@@ -2105,7 +2195,7 @@ void MainWindow::saveWorkspace() {
     QDir().mkpath(folder);
     QFile f(folder + "/" + m_workspace + ".json");
     if (f.open(QIODevice::WriteOnly))
-        f.write(QJsonDocument(QJsonObject{{"schema", 3},
+        f.write(QJsonDocument(QJsonObject{{"schema", 5},
                                           {"name", m_workspace},
                                           {"layout", QString::fromLatin1(saveState(1).toBase64())}})
                     .toJson());
