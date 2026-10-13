@@ -303,6 +303,7 @@ void MainWindow::buildMenus() {
     command(image, "Auto Color", QKeySequence("Ctrl+Shift+B"));
     image->addSeparator();
     command(image, "Image Size...");
+    command(image, "Super Resolution...");
     command(image, "Canvas Size...");
     auto *rot = image->addMenu("Image Rotation");
     command(rot, "180°");
@@ -332,6 +333,7 @@ void MainWindow::buildMenus() {
     command(layer, "Add Layer Mask");
     command(layer, "Remove Background");
     command(layer, "Remove Background (AI)");
+    command(layer, "Upscale Layer...");
     command(layer, "Delete Layer Mask");
     command(layer, "Apply Layer Mask");
     command(layer, "Create Clipping Mask", QKeySequence("Ctrl+Alt+G"));
@@ -1652,6 +1654,9 @@ void MainWindow::selectTool(const QString &tool) {
 }
 void MainWindow::addDocument(Document *document) {
     document->setParent(this);
+    // History states is an application preference, like Photoshop's.
+    if (m_settings.contains("history"))
+        document->historyLimit = m_settings.value("history").toInt();
     auto *page = new QWidget;
     auto *v = new QVBoxLayout(page);
     v->setContentsMargins(0, 0, 0, 0);

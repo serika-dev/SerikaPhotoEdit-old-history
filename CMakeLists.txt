@@ -84,7 +84,7 @@ add_library(serika_ui STATIC ${UI_SOURCES} src/ui/canvas/CanvasView.h src/ui/Mai
 target_link_libraries(serika_ui PUBLIC serika_engine Qt6::PrintSupport Qt6::Svg)
 # ONNX Runtime is optional and loaded at runtime; only its MIT C API header is vendored.
 target_include_directories(serika_ui SYSTEM PRIVATE third_party/onnxruntime/include)
-target_link_libraries(serika_ui PRIVATE Qt6::Network)
+target_link_libraries(serika_ui PRIVATE Qt6::Network Qt6::CorePrivate)
 add_library(serika_mcp STATIC src/mcp/McpServer.cpp src/mcp/McpLiveBridge.cpp)
 target_link_libraries(serika_mcp PUBLIC serika_ui Qt6::Network)
 qt_add_executable(SerikaPhotoEdit WIN32 MACOSX_BUNDLE src/app/main.cpp resources/serika.qrc)
@@ -121,6 +121,12 @@ if(BUILD_TESTING)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${suite}_tests.cpp")
       qt_add_executable(${suite}_tests tests/${suite}_tests.cpp resources/serika.qrc)
       target_link_libraries(${suite}_tests PRIVATE serika_ui Qt6::Test)
+      # Optional real-model checks when the Real-ESRGAN release zip has been fetched into .tools/ai.
+      set(serika_esrgan_dir "${CMAKE_CURRENT_SOURCE_DIR}/.tools/ai/esrgan-x4v3")
+      if(EXISTS "${serika_esrgan_dir}/model.zip")
+        target_compile_definitions(${suite}_tests PRIVATE SERIKA_TEST_ESRGAN_ZIP="${serika_esrgan_dir}/model.zip"
+          SERIKA_TEST_ESRGAN_MODEL="${serika_esrgan_dir}/real_esrgan_general_x4v3-onnx-float/real_esrgan_general_x4v3.onnx")
+      endif()
       if(suite STREQUAL "mcp")
         target_link_libraries(${suite}_tests PRIVATE serika_mcp)
         target_compile_definitions(${suite}_tests PRIVATE SERIKA_APP_PATH="$<TARGET_FILE:SerikaPhotoEdit>")

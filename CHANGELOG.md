@@ -28,10 +28,14 @@ All notable changes to Serika PhotoEdit are recorded here. The format follows
 - Draggable RGB and per-channel Curves, histogram overlays, numeric point editing and curve presets.
 - Pattern Fill layers and five gradient styles with multiple colour/opacity stops, plus an editable Gradient Map ramp.
 - MCP layout tools for precise designs: text laid out in a box (wrapped or kept line by line, aligned by its ink and centred optically, optionally shrunk to fit), `measure_text`, `align_layers`, `check_layout` and full-resolution `region` previews, plus layout rules in the server instructions. `inspect_document` reports every layer's ink bounds, and text layers can be restyled.
+- Super resolution like Photoshop's: Image › Super Resolution enlarges the whole document and Layer › Upscale Layer enlarges one layer about its centre, with **AI** (Real-ESRGAN General x4v3 or x4plus, BSD-3, run locally through ONNX Runtime on 128 px tiles, cancellable with progress) or **Preserve Details** (Lanczos-3 with edge sharpening, instant). Preferences › AI downloads and verifies either model.
+- MCP `upscale_layer` and `upscale_document`, `place_image` `resample` (`smooth`, `preserve-details`, `ai`) and `replace_layer_id` to re-render a placed image in place (keeping its mask and stacking), upscale models in `ai_status`, and a warning when an image is enlarged with plain smoothing.
 - `serika_iconsheet` and `serika_psdcheck` developer tools, `scripts/psd_inspect.py` and `scripts/release.py`.
 
 ### Changed
 
+- Preferences redesigned: a searchable sidebar with icons, settings grouped into cards with descriptions, on/off switches, live theme previews, model and runtime status badges, and Restore Defaults. Placeholder pages and settings that had no effect were removed.
+- ONNX Runtime is shared by every AI feature, so subject selection and super resolution load it once.
 - Select subject / Remove background / Add mask is a floating bar near the bottom of the canvas and is off by default (View › Contextual Task Bar).
 - Essentials uses Photoshop's three panel stacks, with Properties as a tab beside Adjustments, so Layers keeps its room on short screens. Workspace layouts saved by earlier builds are reset once.
 - Icons are drawn as vectors at the display's scale, so they stay sharp at 125 % and 150 %.
@@ -50,6 +54,7 @@ All notable changes to Serika PhotoEdit are recorded here. The format follows
 - Editing documents with many layers was very slow: every change re-rendered each layer through full-canvas images. Plain, masked and text layers and full-strength pass-through groups now render directly, with identical pixels; a 63-layer cover dropped from about 5 seconds to 0.3 seconds per change.
 - Adding to, subtracting from or intersecting a selection on a large document took about a second per operation; long MCP action lists froze the window until Windows closed it as not responding.
 - MCP `place_image` ignored a single `width` or `height` instead of scaling proportionally.
+- The History states preference only applied to documents that were already open.
 
 ## [0.0.1] - 2026-10-08
 

@@ -398,6 +398,85 @@ class McpTests : public QObject {
         QVERIFY(failed(call(server, "set_layer_properties",
                             {{"document_id", id}, {"layer_id", layer["id"].toString()}, {"text", "nope"}})));
     }
+    void upscalingToolsEnlargeLayersAndDocuments() {
+        QTemporaryDir root;
+        // A hard-edged checkerboard: what blurs most when enlarged.
+        QImage art(40, 30, QImage::Format_ARGB32);
+        for (int y = 0; y < art.height(); ++y)
+            for (int x = 0; x < art.width(); ++x)
+                art.setPixelColor(x, y, ((x / 5 + y / 5) % 2) ? QColor("#1d4ed8") : QColor("#fde047"));
+        QVERIFY(art.save(root.filePath("art.png")));
+        McpServer server(root.path());
+        initialize(server);
+        const auto id =
+            data(call(server, "create_document",
+                      {{"width", 200}, {"height", 150}, {"background", "#ffffff"}}))["document_id"]
+                .toString();
+        const auto boundsOf = [&](const QString &layerId) {
+            for (const auto &value :
+                 data(call(server, "inspect_document", {{"document_id", id}}))["layers"].toArray())
+                if (value.toObject()["id"].toString() == layerId)
+                    return value.toObject()["bounds"].toArray();
+            return QJsonArray();
+        };
+        // Enlarging with plain smoothing warns and points at resample=ai.
+        const auto soft =
+            data(call(server, "place_image", {{"document_id", id}, {"path", "art.png"}, {"width", 80}}));
+        QVERIFY(soft["warning"].toString().contains("resample=ai"));
+        // replace_layer_id re-renders that layer in place: same layer, same bounds, no new layer.
+        const QString softId = soft["active_layer_id"].toString();
+        const auto replaced = data(call(server, "place_image",
+                                        {{"document_id", id},
+                                         {"path", "art.png"},
+                                         {"replace_layer_id", softId},
+                                         {"resample", "preserve-details"}}));
+        QCOMPARE(replaced["layers"].toArray().size(), soft["layers"].toArray().size());
+        QCOMPARE(replaced["resample"].toString(), QString("preserve-details"));
+        QCOMPARE(boundsOf(softId), (QJsonArray{0, 0, 80, 60}));
+        const auto sharp = data(call(
+            server, "place_image",
+            {{"document_id", id}, {"path", "art.png"}, {"width", 80}, {"resample", "preserve-details"}}));
+        QCOMPARE(sharp["resample"].toString(), QString("preserve-details"));
+        QVERIFY(!sharp.contains("warning"));
+        const QString layerId = sharp["active_layer_id"].toString();
+        QCOMPARE(boundsOf(layerId), (QJsonArray{0, 0, 80, 60}));
+        // upscale_layer grows about the centre: 80 x 60 at (0, 0) becomes 160 x 120 at (-40, -30).
+        const auto grown = data(
+            call(server, "upscale_layer",
+                 {{"document_id", id}, {"layer_id", layerId}, {"scale", 2}, {"method", "preserve-details"}}));
+        QCOMPARE(grown["size"].toArray(), (QJsonArray{160, 120}));
+        QCOMPARE(boundsOf(layerId), (QJsonArray{-40, -30, 160, 120}));
+        QVERIFY(!failed(call(server, "undo", {{"document_id", id}})));
+        QCOMPARE(boundsOf(layerId), (QJsonArray{0, 0, 80, 60}));
+        // Unknown methods are rejected by the input schema.
+        QCOMPARE(
+            call(server, "upscale_layer",
+                 {{"document_id", id}, {"layer_id", layerId}, {"scale", 2}, {"method", "magic"}})["error"]
+                .toObject()["code"]
+                .toInt(),
+            -32602);
+        // upscale_document doubles the canvas and every layer.
+        const auto doubled = data(call(server, "upscale_document",
+                                       {{"document_id", id}, {"scale", 2}, {"method", "preserve-details"}}));
+        QCOMPARE(doubled["size"].toArray(), (QJsonArray{400, 300}));
+        QCOMPARE(boundsOf(layerId), (QJsonArray{0, 0, 160, 120}));
+        const auto status = data(call(server, "ai_status", {}));
+        QCOMPARE(status["upscale_models"].toArray().size(), 2);
+#ifdef SERIKA_TEST_ESRGAN_MODEL
+        // With ONNX Runtime next to the tests and the model fetched, the real network runs.
+        qputenv("SERIKA_UPSCALE_MODEL", SERIKA_TEST_ESRGAN_MODEL);
+        const auto ai = call(server, "upscale_layer",
+                             {{"document_id", id}, {"layer_id", layerId}, {"scale", 1.5}, {"method", "ai"}});
+        qunsetenv("SERIKA_UPSCALE_MODEL");
+        if (!failed(ai)) {
+            QCOMPARE(data(ai)["size"].toArray(), (QJsonArray{240, 180}));
+            QCOMPARE(data(ai)["method"].toString(), QString("ai"));
+        } else {
+            QVERIFY2(result(ai)["content"].toArray().first().toObject()["text"].toString().contains("ONNX"),
+                     "AI upscaling may only fail when the runtime is missing");
+        }
+#endif
+    }
     void layoutToolsPlaceTextExactly() {
         QTemporaryDir root;
         McpServer server(root.path());

@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "tools/AiSegmenter.h"
 #include "tools/LocalAlgorithms.h"
+#include "tools/Upscaler.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -95,35 +96,26 @@ bool MainWindow::runSubjectCommand(const QString &name) {
                          engine == SubjectEngine::Ai ? "AI" : "Fast"));
     return true;
 }
-bool MainWindow::downloadAiModel() {
-    const auto model = AiSegmenter::defaultModel();
-    const QString target = AiSegmenter::defaultModelPath();
-    const auto answer = QMessageBox::question(
-        this, "Download AI model",
-        QString("Download %1 (%2 licence, %3) from Hugging Face?\n\n%4\n\nIt is saved to %5 and only used "
-                "on this computer.")
-            .arg(model.name, model.license, QLocale().formattedDataSize(model.bytes), model.url,
-                 QDir::toNativeSeparators(target)));
-    if (answer != QMessageBox::Yes)
-        return false;
+bool MainWindow::downloadVerified(const QString &title, const QString &label, const QString &url,
+                                  const QString &sha256, qint64 bytes, const QString &target) {
     if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
-        QMessageBox::warning(this, "Download AI model", "Could not create the model folder.");
+        QMessageBox::warning(this, title, "Could not create the model folder.");
         return false;
     }
     QSaveFile file(target);
     if (!file.open(QIODevice::WriteOnly)) {
-        QMessageBox::warning(this, "Download AI model", "Could not write " + target + ".");
+        QMessageBox::warning(this, title, "Could not write " + QDir::toNativeSeparators(target) + ".");
         return false;
     }
     QNetworkAccessManager network;
-    QNetworkRequest request{QUrl(model.url)};
+    QNetworkRequest request{QUrl(url)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       "SerikaPhotoEdit/" + QCoreApplication::applicationVersion());
     QNetworkReply *reply = network.get(request);
     QCryptographicHash hash(QCryptographicHash::Sha256);
-    QProgressDialog progress("Downloading " + model.name + "…", "Cancel", 0, 1000, this);
-    progress.setWindowTitle("Serika AI");
+    QProgressDialog progress("Downloading " + label + "…", "Cancel", 0, 1000, this);
+    progress.setWindowTitle(title);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     bool writeFailed = false;
@@ -134,7 +126,7 @@ bool MainWindow::downloadAiModel() {
             writeFailed = true;
     });
     connect(reply, &QNetworkReply::downloadProgress, this, [&](qint64 received, qint64 total) {
-        progress.setValue(int(1000 * received / std::max<qint64>(1, total > 0 ? total : model.bytes)));
+        progress.setValue(int(1000 * received / std::max<qint64>(1, total > 0 ? total : bytes)));
     });
     connect(&progress, &QProgressDialog::canceled, reply, &QNetworkReply::abort);
     QEventLoop loop;
@@ -153,20 +145,60 @@ bool MainWindow::downloadAiModel() {
     }
     // The published SHA-256 guards against truncated or substituted downloads.
     const QString digest = QString::fromLatin1(hash.result().toHex());
-    if (!networkError.isEmpty() || writeFailed || digest != model.sha256) {
+    if (!networkError.isEmpty() || writeFailed || digest != sha256) {
         file.cancelWriting();
-        QMessageBox::warning(this, "Download AI model",
+        QMessageBox::warning(this, title,
                              !networkError.isEmpty() ? "The download failed: " + networkError
-                             : writeFailed           ? "Writing the model file failed."
+                             : writeFailed           ? "Writing the downloaded file failed."
                                                      : "The downloaded file did not match the published "
                                                        "checksum and was discarded.");
         return false;
     }
     if (!file.commit()) {
-        QMessageBox::warning(this, "Download AI model", "Could not save the model file.");
+        QMessageBox::warning(this, title, "Could not save the downloaded file.");
         return false;
     }
+    return true;
+}
+bool MainWindow::downloadAiModel() {
+    const auto model = AiSegmenter::defaultModel();
+    const QString target = AiSegmenter::defaultModelPath();
+    const auto answer = QMessageBox::question(
+        this, "Download AI model",
+        QString("Download %1 (%2 licence, %3) from Hugging Face?\n\n%4\n\nIt is saved to %5 and only used "
+                "on this computer.")
+            .arg(model.name, model.license, QLocale().formattedDataSize(model.bytes), model.url,
+                 QDir::toNativeSeparators(target)));
+    if (answer != QMessageBox::Yes ||
+        !downloadVerified("Download AI model", model.name, model.url, model.sha256, model.bytes, target))
+        return false;
     AiSegmenter::instance().setModelPath({});
+    showMessage(model.name + " installed");
+    return true;
+}
+bool MainWindow::downloadUpscaleModel(const QString &id) {
+    const auto model = Upscaler::model(id);
+    if (model.id.isEmpty())
+        return false;
+    const QString folder = QFileInfo(Upscaler::modelPath(id)).absolutePath();
+    const auto answer = QMessageBox::question(
+        this, "Download upscale model",
+        QString(
+            "Download %1 (%2 licence, %3) from Qualcomm AI Hub?\n\n%4\n\nIt is saved to %5 and only used on "
+            "this computer.")
+            .arg(model.name, model.license, QLocale().formattedDataSize(model.bytes), model.url,
+                 QDir::toNativeSeparators(folder)));
+    const QString archive = folder + ".zip";
+    if (answer != QMessageBox::Yes || !downloadVerified("Download upscale model", model.name, model.url,
+                                                        model.sha256, model.bytes, archive))
+        return false;
+    QString error;
+    const bool installed = Upscaler::installArchive(archive, id, &error);
+    QFile::remove(archive);
+    if (!installed) {
+        QMessageBox::warning(this, "Download upscale model", error);
+        return false;
+    }
     showMessage(model.name + " installed");
     return true;
 }

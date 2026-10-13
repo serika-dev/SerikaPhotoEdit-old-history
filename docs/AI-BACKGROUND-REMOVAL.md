@@ -42,3 +42,20 @@ Runtime's MIT C API header is vendored (`third_party/onnxruntime`). Model files 
 
 Agents call `select_subject` and `remove_background` with `engine: "fast" | "ai"`, and check
 readiness with `ai_status`. See [MCP-SERVER.md](MCP-SERVER.md).
+
+## Super resolution
+
+Image › Super Resolution and Layer › Upscale Layer enlarge art with one of two methods:
+
+| Method | How | Speed |
+| --- | --- | --- |
+| AI | Real-ESRGAN (BSD-3-Clause) through the same ONNX Runtime, on overlapping 128 px tiles; alpha is resampled separately and transparent colours are bled outward so edges stay clean | General x4v3 ≈ 0.4 s per tile, x4plus ≈ 6 s per tile on a laptop CPU |
+| Preserve Details | Lanczos-3 in premultiplied 16-bit light with an adaptive unsharp mask | instant |
+
+The models are Qualcomm AI Hub ONNX exports (`real_esrgan_general_x4v3`, `real_esrgan_x4plus`,
+release v0.64.0). Preferences › AI downloads the release zip, checks its published SHA-256 and
+extracts the `.onnx` graph and its external `.data` weights into
+`%APPDATA%/Serika/SerikaPhotoEdit/models/<id>/`. `SERIKA_UPSCALE_MODEL` points every model id at
+one `.onnx` file for testing. The models enlarge 4×; other scales are resampled from that result
+with Lanczos, and enlargements under 5 % use Preserve Details.
+

@@ -41,7 +41,11 @@ steps because a downscaled preview "looks fine" — at 1800 px wide a 20 px erro
   design (same family, size and colour for the same role).
 - Everything else: `align_layers` (by ink) to a `rect`, the canvas or another layer; `as_group`
   to move a set together. Distances between blocks come from the grid, not from previews.
-- Images: `place_image` with only `width` or `height` keeps the aspect ratio. To fill a panel,
+- Images: `place_image` with only `width` or `height` keeps the aspect ratio. Whenever art is placed
+  larger than its file (check the file's pixel size first), pass `resample: "ai"` — plain smoothing
+  looks soft and pixelated at print size. Art that is already soft: `place_image` again with
+  `replace_layer_id` and `resample: "ai"` (keeps mask and stacking), or `upscale_layer`. `ai_status`
+  lists the upscale models; x4plus is best for hero art (minutes), x4v3 for small images (seconds). To fill a panel,
   overflow it and mask (rectangle selection → `add_layer_mask from: selection`). `remove_background`
   only on art whose background must go (`engine: "ai"` for busy backgrounds; ~20–80 s on a CPU).
 - Templates: keep their frame on top — `move_layers … position: above, target_layer_id: <bottom>`.

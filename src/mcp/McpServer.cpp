@@ -6,6 +6,7 @@
 #include "io/FormatIO.h"
 #include "tools/AiSegmenter.h"
 #include "tools/LocalAlgorithms.h"
+#include "tools/Upscaler.h"
 #include <QAbstractTextDocumentLayout>
 #include <QBuffer>
 #include <QColorSpace>
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <limits>
 #include <serika/Version.h>
+#include <utility>
 #ifdef Q_OS_WIN
 #include <fcntl.h>
 #include <io.h>
@@ -53,7 +55,10 @@ const QString LayoutRules =
     "(3) Inset text from panel edges by padding (about 4% of the panel width). (4) Use measure_text to "
     "pick sizes, align_layers to align anything else by its ink. (5) Images: place_image with one "
     "dimension to keep the aspect ratio; cover a panel by overflowing it and masking (add_layer_mask "
-    "from a rectangle selection). (6) Keep a template's frame on top: put new art just above the "
+    "from a rectangle selection). Never enlarge art with plain smoothing: when an image is placed larger "
+    "than its pixels, pass resample=ai (Real-ESRGAN super resolution, see ai_status) or at least "
+    "preserve-details; upscale_layer fixes art that is already soft. (6) Keep a template's frame on top: put "
+    "new art just above the "
     "bottom layer. (7) Before finishing, run check_layout (with the panels as safe_areas) until it reports "
     "no errors, review every warning, then preview_document with region at full resolution for every "
     "block of text.";
@@ -120,6 +125,47 @@ QImage segmentSubject(const QImage &composite, SubjectEngine engine, QString *er
     if (error)
         *error = failure;
     return result;
+}
+// Upscaling also runs on a worker so live windows keep painting through minutes of model work.
+QHash<quint64, QImage> runUpscale(const QHash<quint64, Upscaler::Job> &jobs, Upscaler::Method method,
+                                  const QString &model, double detail, QString *error) {
+    if (!QCoreApplication::instance() || method == Upscaler::Method::PreserveDetails)
+        return Upscaler::upscaleBatch(jobs, method, model, detail, {}, error);
+    QHash<quint64, QImage> result;
+    QString failure;
+    QEventLoop loop;
+    QThread *worker =
+        QThread::create([&] { result = Upscaler::upscaleBatch(jobs, method, model, detail, {}, &failure); });
+    QObject::connect(worker, &QThread::finished, &loop, &QEventLoop::quit);
+    worker->start();
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
+    worker->wait();
+    delete worker;
+    if (error)
+        *error = failure;
+    return result;
+}
+// Reads method (under `key`), model and detail; `fallback` is the method when none is given.
+bool upscaleOptions(const QJsonObject &args, const QString &key, Upscaler::Method fallback,
+                    Upscaler::Method *method, QString *model, double *detail, QString *error) {
+    *method = fallback;
+    if (args.contains(key) && !Upscaler::parseMethod(args[key].toString(), method)) {
+        *error = key + " must be ai or preserve-details.";
+        return false;
+    }
+    *model = args["model"].toString(Upscaler::preferredModelId());
+    if (Upscaler::model(*model).id.isEmpty()) {
+        *error = "Unknown model; ai_status lists the upscale models.";
+        return false;
+    }
+    if (*method == Upscaler::Method::Ai && !Upscaler::installed(*model)) {
+        *error =
+            Upscaler::model(*model).name +
+            " is not installed. Ask the user to download it in Preferences > AI, or use preserve-details.";
+        return false;
+    }
+    *detail = std::clamp(args["detail"].toDouble(0.5), 0.0, 1.0);
+    return true;
 }
 QVector<quint64> layerIdList(const QJsonObject &args, const Document *document, QString *error) {
     QVector<quint64> ids;
@@ -614,6 +660,24 @@ QJsonArray McpServer::toolDefinitions(bool live) {
                              {"description", "fast: low-resource colour model. ai: local BiRefNet model "
                                              "(see ai_status). Defaults to the user's preference."}};
     const QJsonObject number{{"type", "number"}, {"minimum", -30000}, {"maximum", 30000}};
+    QJsonArray modelIds;
+    for (const auto &info : Upscaler::models())
+        modelIds.append(info.id);
+    const QJsonObject upscaleMethod{
+        {"type", "string"},
+        {"enum", QJsonArray{"ai", "preserve-details"}},
+        {"description",
+         "ai (default): Real-ESRGAN super resolution on this computer, rebuilds detail (seconds "
+         "to minutes). preserve-details: Lanczos with sharpening (instant)."}};
+    const QJsonObject upscaleModel{
+        {"type", "string"},
+        {"enum", modelIds},
+        {"description", "Upscale model (see ai_status); defaults to the user's choice."}};
+    const QJsonObject detail{{"type", "number"},
+                             {"minimum", 0},
+                             {"maximum", 1},
+                             {"description", "Sharpening for preserve-details, 0..1 (default 0.5)."}};
+    const QJsonObject scale{{"type", "number"}, {"minimum", 1}, {"maximum", 8}};
     const QJsonObject rect{{"type", "array"},
                            {"items", QJsonObject{{"type", "number"}}},
                            {"minItems", 4},
@@ -731,7 +795,9 @@ QJsonArray McpServer::toolDefinitions(bool live) {
              "Describe every run_actions command with parameters and a working example, plus the "
              "adjustment, filter and blend-mode names.",
              {}, {}, true),
-        tool("ai_status", "Report the subject engines (fast, ai) and whether the local AI model is ready.",
+        tool("ai_status",
+             "Report the subject engines (fast, ai), the upscale models and whether the local AI models are "
+             "installed.",
              {}, {}, true),
         tool("measure_text",
              "Measure text before placing it: ink width/height (and offset from the layer origin) for a font "
@@ -816,8 +882,41 @@ QJsonArray McpServer::toolDefinitions(bool live) {
               {"x", number},
               {"y", number},
               {"width", integer(1, 30000)},
-              {"height", integer(1, 30000)}},
-             {"document_id", "path"})};
+              {"height", integer(1, 30000)},
+              {"resample",
+               QJsonObject{{"type", "string"},
+                           {"enum", QJsonArray{"smooth", "preserve-details", "ai"}},
+                           {"description", "How to resize when width/height differ from the file: smooth "
+                                           "(bicubic, default), preserve-details, or ai super resolution for "
+                                           "enlarging low-resolution art."}}},
+              {"model", upscaleModel},
+              {"detail", detail},
+              {"replace_layer_id",
+               field("string",
+                     "Replace this pixel layer's contents instead of adding a layer; keeps its mask, "
+                     "stacking and name. x/y/width/height default to the layer's current ones.")}},
+             {"document_id", "path"}),
+        tool("upscale_layer",
+             "Enlarge a pixel layer about its centre by `scale` with AI super resolution or Preserve Details "
+             "(one undo step). Use it when art looks soft or pixelated.",
+             {{"document_id", doc},
+              {"layer_id", layer},
+              {"scale", scale},
+              {"method", upscaleMethod},
+              {"model", upscaleModel},
+              {"detail", detail}},
+             {"document_id", "layer_id", "scale"}),
+        tool("upscale_document",
+             "Image > Super Resolution: enlarge the whole document by `scale` (or to width/height). Pixel "
+             "layers are upscaled; text, shapes and smart objects re-render at the new size.",
+             {{"document_id", doc},
+              {"scale", scale},
+              {"width", integer(1, 30000)},
+              {"height", integer(1, 30000)},
+              {"method", upscaleMethod},
+              {"model", upscaleModel},
+              {"detail", detail}},
+             {"document_id"})};
     if (live)
         tools.append(tool("focus_document", "Bring a document's tab to the front of the Serika window.",
                           {{"document_id", doc}}, {"document_id"}));
@@ -1058,13 +1157,24 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
     }
     if (name == "ai_status") {
         const auto status = AiSegmenter::instance().status();
+        QJsonArray upscaleModels;
+        for (const auto &info : Upscaler::models())
+            upscaleModels.append(QJsonObject{{"id", info.id},
+                                             {"name", info.name},
+                                             {"summary", info.summary},
+                                             {"scale", info.scale},
+                                             {"installed", Upscaler::installed(info.id)},
+                                             {"seconds_per_128px_tile_cpu", info.secondsPerTile}});
         return textResult({{"engines", QJsonArray{"fast", "ai"}},
                            {"preferred", subjectEngineId(preferredSubjectEngine())},
                            {"ai_ready", status.ready()},
                            {"ai_runtime_available", status.runtimeAvailable},
                            {"ai_model_available", status.modelAvailable},
                            {"ai_runtime_version", status.runtimeVersion},
-                           {"message", status.message}});
+                           {"message", status.message},
+                           {"upscale_methods", QJsonArray{"ai", "preserve-details"}},
+                           {"upscale_preferred_model", Upscaler::preferredModelId()},
+                           {"upscale_models", upscaleModels}});
     }
     QString error;
     if (name == "create_document" || name == "open_document") {
@@ -1587,9 +1697,10 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         return textResult(describe(id, document));
     }
     if (name == "place_image") {
+        QJsonObject place = args;
         if (document->state.layers.size() >= 256)
             return failure("MCP layer limit is 256.");
-        const auto path = checkedPath(args["path"].toString(), false, &error);
+        const auto path = checkedPath(std::as_const(place)["path"].toString(), false, &error);
         if (path.isEmpty() || !readImageInput(path, &error))
             return failure(error);
         QImageReader reader(path);
@@ -1598,38 +1709,169 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         QImage image = reader.read();
         if (image.isNull())
             return failure("Could not decode the image: " + reader.errorString());
-        if (args.contains("width") || args.contains("height")) {
+        double enlargement = 1.0;
+        QString resampled;
+        QElapsedTimer timer;
+        timer.start();
+        // replace_layer_id swaps the pixels of an existing layer, keeping its mask, stacking, name and
+        // effects; position and size default to the layer's current ones.
+        int replaceIndex = -1;
+        if (place.contains("replace_layer_id")) {
+            bool ok = false;
+            const quint64 target = std::as_const(place)["replace_layer_id"].toString().toULongLong(&ok);
+            replaceIndex = ok ? document->indexForId(target) : -1;
+            if (replaceIndex < 0)
+                return failure("Unknown replace_layer_id.");
+            const Layer &old = document->state.layers[replaceIndex];
+            if (old.kind != LayerKind::Pixel)
+                return failure("replace_layer_id must name a pixel layer.");
+            if (const auto lock = editLock(document, target); !lock.isEmpty())
+                return failure(lock);
+            if (!place.contains("width") && !place.contains("height") && !old.pixels.size.isEmpty()) {
+                place["width"] = old.pixels.size.width();
+                place["height"] = old.pixels.size.height();
+            }
+            if (!place.contains("x"))
+                place["x"] = old.offset.x();
+            if (!place.contains("y"))
+                place["y"] = old.offset.y();
+        }
+        // Read through a const reference: QJsonObject::operator[] would insert missing keys.
+        const QJsonObject &options = place;
+        if (options.contains("width") || options.contains("height")) {
             // One dimension scales the other proportionally; both set the exact size.
-            QSize size(args["width"].toInt(), args["height"].toInt());
-            if (!args.contains("height"))
+            QSize size(options["width"].toInt(), options["height"].toInt());
+            if (!options.contains("height"))
                 size.setHeight(
                     std::max(1, int(std::lround(double(size.width()) * image.height() / image.width()))));
-            if (!args.contains("width"))
+            if (!options.contains("width"))
                 size.setWidth(
                     std::max(1, int(std::lround(double(size.height()) * image.width() / image.height()))));
             if (qint64(size.width()) * size.height() > MaxPixels)
                 return failure("The scaled image exceeds MCP limits.");
-            image = image.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            if (options["resample"].toString("smooth") == "smooth") {
+                enlargement = double(size.width()) / image.width();
+                image = image.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            } else {
+                Upscaler::Method method;
+                QString model;
+                double detail = 0.5;
+                if (!upscaleOptions(options, "resample", Upscaler::Method::PreserveDetails, &method, &model,
+                                    &detail, &error))
+                    return failure(error);
+                const auto result = runUpscale({{0, {image, size}}}, method, model, detail, &error);
+                if (result.isEmpty())
+                    return failure(error);
+                image = result.value(0);
+                resampled = Upscaler::methodId(method);
+            }
         }
-        if (const auto *active = document->activeLayer()) {
+        if (const auto *active = document->activeLayer(); active && replaceIndex < 0) {
             const quint64 parent = active->kind == LayerKind::Group ? active->id : active->parentId;
             const auto lock = editLock(document, parent);
             if (!lock.isEmpty())
                 return failure(lock);
         }
-        document->beginTransaction("Place image");
-        document->addLayer(args["name"].toString(QFileInfo(path).completeBaseName()));
-        document->mutate("Place image", [&] {
-            auto *layer = document->activeLayer();
-            layer->pixels = TileImage::fromImage(image.convertToFormat(QImage::Format_RGBA8888));
-            layer->offset = {args["x"].toDouble(), args["y"].toDouble()};
-        });
-        if (!validDocument(document, &error)) {
-            document->cancelTransaction();
-            return failure(error);
+        if (replaceIndex >= 0) {
+            document->mutate("Replace image", [&] {
+                auto &layer = document->state.layers[replaceIndex];
+                layer.pixels = TileImage::fromImage(image.convertToFormat(QImage::Format_RGBA8888));
+                layer.offset = {options["x"].toDouble(), options["y"].toDouble()};
+            });
+        } else {
+            document->beginTransaction("Place image");
+            document->addLayer(options["name"].toString(QFileInfo(path).completeBaseName()));
+            document->mutate("Place image", [&] {
+                auto *layer = document->activeLayer();
+                layer->pixels = TileImage::fromImage(image.convertToFormat(QImage::Format_RGBA8888));
+                layer->offset = {options["x"].toDouble(), options["y"].toDouble()};
+            });
+            if (!validDocument(document, &error)) {
+                document->cancelTransaction();
+                return failure(error);
+            }
+            document->endTransaction();
         }
-        document->endTransaction();
-        return textResult(describe(id, document));
+        auto description = describe(id, document);
+        if (!resampled.isEmpty()) {
+            description["resample"] = resampled;
+            description["milliseconds"] = qint64(timer.elapsed());
+        } else if (enlargement > 1.3) {
+            description["warning"] =
+                QString(
+                    "The image was enlarged %1x with smooth resampling and will look soft. Undo and place it "
+                    "again with resample=ai (or upscale_layer) for a sharp result.")
+                    .arg(enlargement, 0, 'f', 1);
+        }
+        return textResult(description);
+    }
+    if (name == "upscale_layer" || name == "upscale_document") {
+        Upscaler::Method method;
+        QString model;
+        double detail = 0.5;
+        if (!upscaleOptions(args, "method", Upscaler::Method::Ai, &method, &model, &detail, &error))
+            return failure(error);
+        const double factor = args["scale"].toDouble(0);
+        QElapsedTimer timer;
+        timer.start();
+        QJsonObject extra;
+        if (name == "upscale_layer") {
+            bool ok = false;
+            const quint64 layerId = args["layer_id"].toString().toULongLong(&ok);
+            const int index = ok ? document->indexForId(layerId) : -1;
+            if (index < 0)
+                return failure("Unknown layer ID.");
+            const Layer &layer = document->state.layers[index];
+            if (layer.kind != LayerKind::Pixel || layer.pixels.empty())
+                return failure("upscale_layer works on pixel layers; rasterize the layer first.");
+            if (const auto lock = editLock(document, layerId); !lock.isEmpty())
+                return failure(lock);
+            if (factor < 1 || factor > 8)
+                return failure("scale must be between 1 and 8.");
+            const QSize target(std::max(1, qRound(layer.pixels.size.width() * factor)),
+                               std::max(1, qRound(layer.pixels.size.height() * factor)));
+            if (qint64(target.width()) * target.height() > MaxPixels)
+                return failure("The upscaled layer would exceed MCP limits; use a smaller scale.");
+            const auto result =
+                runUpscale({{layerId, {layer.pixels.image(), target}}}, method, model, detail, &error);
+            if (result.isEmpty() || !Upscaler::applyLayer(document, layerId, result.value(layerId), &error))
+                return failure(error);
+            extra["size"] = QJsonArray{target.width(), target.height()};
+        } else {
+            const QSize from = document->state.size;
+            QSize target(qRound(from.width() * factor), qRound(from.height() * factor));
+            if (factor == 0) {
+                target = QSize(args["width"].toInt(), args["height"].toInt());
+                if (!args.contains("height") && target.width() > 0)
+                    target.setHeight(
+                        std::max(1, qRound(double(target.width()) * from.height() / from.width())));
+                if (!args.contains("width") && target.height() > 0)
+                    target.setWidth(
+                        std::max(1, qRound(double(target.height()) * from.width() / from.height())));
+            }
+            if (target.isEmpty() || (factor != 0 && (factor < 1 || factor > 8)))
+                return failure("Give scale (1-8) or width/height.");
+            if (qint64(target.width()) * target.height() > MaxPixels)
+                return failure("The document would exceed the MCP limit of 16 million pixels.");
+            const auto jobs = Upscaler::documentJobs(document, target);
+            QHash<quint64, QImage> result;
+            if (!jobs.isEmpty()) {
+                result = runUpscale(jobs, method, model, detail, &error);
+                if (result.isEmpty())
+                    return failure(error);
+            }
+            document->resizeImage(target, Qt::SmoothTransformation, result, "Super Resolution");
+            extra["size"] = QJsonArray{target.width(), target.height()};
+            extra["layers_upscaled"] = int(result.size());
+        }
+        auto description = describe(id, document);
+        for (auto it = extra.begin(); it != extra.end(); ++it)
+            description[it.key()] = it.value();
+        description["method"] = Upscaler::methodId(method);
+        if (method == Upscaler::Method::Ai)
+            description["model"] = model;
+        description["milliseconds"] = qint64(timer.elapsed());
+        return textResult(description);
     }
     if (name == "run_actions") {
         const auto steps = args["steps"].toArray();

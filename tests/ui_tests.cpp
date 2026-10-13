@@ -1,3 +1,4 @@
+#include "tools/Upscaler.h"
 #include "ui/MainWindow.h"
 #include "ui/panels/LayerTree.h"
 #include <QAction>
@@ -5,8 +6,12 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDockWidget>
+#include <QFileInfo>
+#include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -372,6 +377,128 @@ class UiTests : public QObject {
         QVERIFY(undo);
         QVERIFY(save);
         QVERIFY(open);
+    }
+    void preferencesPagesSearchAndSave() {
+        MainWindow window;
+        show(window);
+        // SERIKA_UI_GRAB=<folder> saves each page for visual review.
+        const QString grabs = qEnvironmentVariable("SERIKA_UI_GRAB");
+        bool checked = false;
+        QTimer::singleShot(5000, &window, [] {
+            if (auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget()))
+                dialog->reject();
+        });
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            QCOMPARE(dialog->windowTitle(), QString("Preferences"));
+            auto *nav = dialog->findChild<QListWidget *>("prefsNav");
+            auto *search = dialog->findChild<QLineEdit *>("prefsSearch");
+            QVERIFY(nav && search);
+            QStringList pages;
+            for (int i = 0; i < nav->count(); ++i)
+                pages << nav->item(i)->text();
+            QCOMPARE(pages, (QStringList{"General", "Interface", "Performance", "Tools", "Export", "AI"}));
+            nav->setCurrentRow(nav->count() - 1);
+            for (int i = 0; i < nav->count(); ++i) {
+                nav->setCurrentRow(i);
+                QCoreApplication::processEvents();
+                if (!grabs.isEmpty())
+                    dialog->grab().save(grabs + "/prefs-" + nav->item(i)->text().toLower() + ".png");
+            }
+            // Search narrows the pages and jumps to the first match.
+            search->setText("jpeg");
+            QCoreApplication::processEvents();
+            QCOMPARE(nav->currentItem()->text(), QString("Export"));
+            QVERIFY(nav->item(0)->isHidden());
+            search->clear();
+            QVERIFY(!nav->item(0)->isHidden());
+            nav->setCurrentRow(0);
+            auto *states = dialog->findChild<QSpinBox *>("historyStates");
+            QVERIFY(states);
+            states->setValue(77);
+            checked = true;
+            QTest::mouseClick(dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok),
+                              Qt::LeftButton);
+        });
+        window.runCommand("Preferences...");
+        QVERIFY(checked);
+        window.openDemo();
+        QCOMPARE(window.currentDocument()->historyLimit, 77);
+    }
+    void upscalerResamplesAndInstallsModels() {
+        QImage art(24, 16, QImage::Format_ARGB32_Premultiplied);
+        art.fill(Qt::transparent);
+        for (int y = 4; y < 12; ++y)
+            for (int x = 4; x < 20; ++x)
+                art.setPixelColor(x, y, QColor("#e11d48"));
+        const QImage big = Upscaler::preserveDetails(art, {96, 64}, 0.5);
+        QCOMPARE(big.size(), QSize(96, 64));
+        // Colour and transparency survive: the centre stays opaque red, the corner transparent.
+        QCOMPARE(big.pixelColor(48, 32).alpha(), 255);
+        QVERIFY(qAbs(big.pixelColor(48, 32).red() - 0xe1) <= 3);
+        QCOMPARE(big.pixelColor(1, 1).alpha(), 0);
+        QCOMPARE(Upscaler::tileCount({96, 96}), 1);
+        QCOMPARE(Upscaler::tileCount({97, 200}), 6);
+        Upscaler::Method method;
+        QVERIFY(Upscaler::parseMethod("preserve-details", &method) &&
+                method == Upscaler::Method::PreserveDetails);
+        QVERIFY(!Upscaler::parseMethod("bicubic", &method));
+#ifdef SERIKA_TEST_ESRGAN_ZIP
+        // Installing the verified release zip extracts the graph and its external weights.
+        QString error;
+        const QString id = Upscaler::defaultModelId();
+        QVERIFY2(Upscaler::installArchive(SERIKA_TEST_ESRGAN_ZIP, id, &error), qPrintable(error));
+        QVERIFY(Upscaler::installed(id));
+        QVERIFY(QFileInfo::exists(QFileInfo(Upscaler::modelPath(id)).absolutePath() +
+                                  "/real_esrgan_general_x4v3.data"));
+        const QImage ai = Upscaler::aiUpscale(art, {48, 32}, id, {}, &error);
+        if (!ai.isNull()) {
+            QCOMPARE(ai.size(), QSize(48, 32));
+            QCOMPARE(ai.pixelColor(1, 1).alpha(), 0);
+            QVERIFY(ai.pixelColor(24, 16).red() > 180);
+        } else {
+            QVERIFY2(error.contains("ONNX"), qPrintable(error));
+        }
+        QDir(QFileInfo(Upscaler::modelPath(id)).absolutePath()).removeRecursively();
+#endif
+    }
+    void upscaleLayerPreserveDetailsDoublesTheLayer() {
+        MainWindow window;
+        show(window);
+        window.openDemo();
+        Document *doc = window.currentDocument();
+        int index = -1;
+        for (int i = 0; i < doc->state.layers.size(); ++i)
+            if (doc->state.layers[i].kind == LayerKind::Pixel && !doc->state.layers[i].pixels.empty() &&
+                !doc->state.layers[i].locked)
+                index = i;
+        QVERIFY(index >= 0);
+        doc->setActiveIndex(index);
+        const Layer before = doc->state.layers[index];
+        const QPointF centre =
+            before.offset + QPointF(before.pixels.size.width(), before.pixels.size.height()) / 2;
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            QCOMPARE(dialog->windowTitle(), QString("Upscale Layer"));
+            for (auto *label : dialog->findChildren<QLabel *>())
+                if (label->text() == "Preserve Details")
+                    QTest::mouseClick(label->parentWidget(), Qt::LeftButton);
+            if (!qEnvironmentVariable("SERIKA_UI_GRAB").isEmpty())
+                dialog->grab().save(qEnvironmentVariable("SERIKA_UI_GRAB") + "/upscale-layer.png");
+            auto *ok = dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok);
+            QVERIFY(ok->isEnabled());
+            QTest::mouseClick(ok, Qt::LeftButton);
+        });
+        window.runCommand("Upscale Layer...");
+        const Layer &after = doc->state.layers[index];
+        QCOMPARE(after.pixels.size, before.pixels.size * 2);
+        const QPointF newCentre =
+            after.offset + QPointF(after.pixels.size.width(), after.pixels.size.height()) / 2;
+        QVERIFY((newCentre - centre).manhattanLength() <= 1.0);
+        doc->undo();
+        QCOMPARE(doc->state.layers[index].pixels.size, before.pixels.size);
     }
 };
 QTEST_MAIN(UiTests)

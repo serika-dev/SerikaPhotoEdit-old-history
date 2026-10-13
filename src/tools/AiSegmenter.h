@@ -5,6 +5,7 @@
 #include <memory>
 
 namespace serika {
+class OnnxModel;
 // A downloadable, open-licensed segmentation model. The default is BiRefNet_lite (MIT).
 struct AiModelInfo {
     QString id, name, license, url, sha256;
@@ -38,12 +39,9 @@ class AiSegmenter {
     ~AiSegmenter();
 
   private:
-    AiSegmenter() = default;
-    struct Runtime;
-    std::unique_ptr<Runtime> m_runtime;
-    QString m_runtimeOverride, m_modelOverride, m_loadedModel;
+    AiSegmenter();
+    std::unique_ptr<OnnxModel> m_model;
+    QString m_modelOverride;
     mutable QMutex m_mutex;
-    bool loadRuntime(QString *error);
-    bool loadSession(QString *error);
 };
 } // namespace serika

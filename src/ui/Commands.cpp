@@ -84,6 +84,10 @@ void MainWindow::runCommand(const QString &name) {
         return;
     if (runSubjectCommand(name))
         return;
+    if (name == "Super Resolution..." || name == "Upscale Layer...") {
+        superResolution(name == "Upscale Layer...");
+        return;
+    }
     if (runSmartObjectCommand(name))
         return;
     if (name == "New...") {

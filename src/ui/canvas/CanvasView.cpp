@@ -3805,6 +3805,44 @@ void paintToolGlyph(QPainter &painter, QPen pen, const QString &name, const QCol
         painter.setPen(pen);
         painter.drawLine(QPointF(9, 9), QPointF(15, 15));
         painter.drawLine(QPointF(15, 9), QPointF(9, 15));
+    } else if (name == "pref:general") {
+        for (const auto &[y, knob] : {std::pair{6.5, 8.5}, {12.0, 15.5}, {17.5, 10.5}}) {
+            painter.drawLine(QPointF(3.5, y), QPointF(20.5, y));
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(knob, y), 2.3, 2.3);
+            painter.setBrush(Qt::NoBrush);
+        }
+    } else if (name == "pref:interface") {
+        painter.fillRect(QRectF(3, 4.5, 6, 15), soft);
+        painter.drawRoundedRect(QRectF(3, 4.5, 18, 15), 2, 2);
+        painter.drawLine(QPointF(9, 4.5), QPointF(9, 19.5));
+        painter.drawLine(QPointF(12, 9), QPointF(18, 9));
+        painter.drawLine(QPointF(12, 12.5), QPointF(16, 12.5));
+    } else if (name == "pref:performance") {
+        QPainterPath dial;
+        dial.arcMoveTo(QRectF(3, 5, 18, 18), 200);
+        dial.arcTo(QRectF(3, 5, 18, 18), 200, -220);
+        painter.drawPath(dial);
+        painter.drawLine(QPointF(12, 14), QPointF(16.5, 9));
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 14), 1.8, 1.8);
+        painter.setBrush(Qt::NoBrush);
+    } else if (name == "pref:export") {
+        painter.drawPolyline(QPolygonF{{4, 13.5}, {4, 19.5}, {20, 19.5}, {20, 13.5}});
+        painter.drawLine(QPointF(12, 15), QPointF(12, 4));
+        painter.drawPolyline(QPolygonF{{8, 8}, {12, 4}, {16, 8}});
+    } else if (name == "pref:ai") {
+        const auto sparkle = [](QPointF c, qreal r) {
+            QPainterPath p;
+            p.moveTo(c.x(), c.y() - r);
+            p.quadTo(c, {c.x() + r, c.y()});
+            p.quadTo(c, {c.x(), c.y() + r});
+            p.quadTo(c, {c.x() - r, c.y()});
+            p.quadTo(c, {c.x(), c.y() - r});
+            return p;
+        };
+        fill(sparkle({10, 13}, 7.5), color);
+        fill(sparkle({18, 5.5}, 3.5), color);
     } else {
         painter.drawRoundedRect(QRectF(4, 4, 16, 16), 2, 2);
     }

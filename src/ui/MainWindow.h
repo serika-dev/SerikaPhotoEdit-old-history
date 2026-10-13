@@ -154,6 +154,11 @@ class MainWindow : public QMainWindow {
     bool runSubjectCommand(const QString &name);
     QImage computeSubject(const QImage &composite, SubjectEngine engine, QString *error);
     bool downloadAiModel();
+    bool downloadUpscaleModel(const QString &id);
+    // Downloads `url` to `target`, keeping it only when its SHA-256 matches.
+    bool downloadVerified(const QString &title, const QString &label, const QString &url,
+                          const QString &sha256, qint64 bytes, const QString &target);
+    void superResolution(bool layerOnly);
     void transformDialog();
     void layerStyles();
     void exportAs();

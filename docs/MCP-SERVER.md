@@ -64,10 +64,11 @@ stdout carries only protocol messages and diagnostics go to stderr.
 | `preview_document`, `preview_layer` | PNG image content of the composite or one layer, 32–2048 pixels on the longest edge; `region` crops at full resolution |
 | `save_document` | Editable SPE/SPEB, compatible PSD/PSB, or flattened raster export |
 | `select_layer`, `set_layer_properties` | Active layer; name, opacity, fill, visibility, blend mode, lock, position, text and colour |
-| `add_layer`, `create_text_layer`, `place_image` | Pixel/group/fill/text layers; text in a `box` wraps, aligns its ink exactly and can `fit`; an image file from the workspace as a positioned, scaled layer |
+| `add_layer`, `create_text_layer`, `place_image` | Pixel/group/fill/text layers; text in a `box` wraps, aligns its ink exactly and can `fit`; an image file from the workspace as a positioned, scaled layer; `resample: ai` enlarges low-resolution art with super resolution and `replace_layer_id` re-renders an existing layer in place |
 | `measure_text`, `align_layers`, `check_layout` | Ink size of text before placing it; align layers by ink to the canvas, selection, a rect or a layer; report text overflowing safe areas, overlapping other text or crossing panel edges |
 | `duplicate_layers`, `delete_layers`, `group_layers`, `ungroup_layers`, `move_layers` | Multi-layer operations by ID; `move_layers` places above/below/inside a target or at the top/bottom |
-| `select_subject`, `remove_background`, `ai_status` | Fast or local AI engine; background removal masks the target layer from its own pixels ([details](AI-BACKGROUND-REMOVAL.md)) |
+| `select_subject`, `remove_background`, `ai_status` | Fast or local AI engine; background removal masks the target layer from its own pixels ([details](AI-BACKGROUND-REMOVAL.md)); `ai_status` also lists the upscale models |
+| `upscale_layer`, `upscale_document` | Super resolution: enlarge a pixel layer about its centre, or the whole document, by `scale` with `method` `ai` (Real-ESRGAN, default) or `preserve-details`; one undo step |
 | `add_layer_mask`, `delete_layer_mask` | Reveal-all, hide-all or selection masks; delete or apply |
 | `run_actions`, `list_actions` | 1–100 native action steps in one undoable transaction; `list_actions` documents every command with a tested example |
 | `undo`, `redo` | Edit history |
