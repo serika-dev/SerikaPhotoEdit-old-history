@@ -42,7 +42,9 @@ class MainWindow : public QMainWindow {
     void adoptDocument(Document *document);
     bool closeDocumentFor(Document *document, bool discard, QString *error);
     bool focusDocument(Document *document);
+    // Never shows a dialog: a note in the document status line, plus a title-bar marker while connected.
     void setAgentStatus(const QString &text);
+    void setAgentConnected(bool connected);
 
   protected:
     void closeEvent(QCloseEvent *) override;
@@ -98,6 +100,7 @@ class MainWindow : public QMainWindow {
     bool m_grid = false;
     bool m_guides = true;
     bool m_quickMask = false;
+    bool m_agentConnected = false;
     int m_screenMode = 0;
     QTimer m_recovery;
     QTimer m_refreshTimer;

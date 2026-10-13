@@ -97,8 +97,10 @@ void McpLiveBridge::accept() {
 void McpLiveBridge::forget(QLocalSocket *socket) {
     m_sessions.erase(socket);
     socket->deleteLater();
-    if (m_window && m_sessions.empty())
+    if (m_window && m_sessions.empty()) {
+        m_window->setAgentConnected(false);
         m_window->setAgentStatus("AI agent disconnected");
+    }
 }
 void McpLiveBridge::drain(QLocalSocket *socket) {
     const auto found = m_sessions.find(socket);
@@ -148,8 +150,10 @@ QByteArray McpLiveBridge::respond(Session &session, const QByteArray &line) {
             return QJsonDocument(QJsonObject{{"ok", false}, {"error", session.server->startupError()}})
                 .toJson(QJsonDocument::Compact);
         session.attached = true;
-        if (m_window)
+        if (m_window) {
+            m_window->setAgentConnected(true);
             m_window->setAgentStatus("AI agent connected · workspace " + QFileInfo(workspace).fileName());
+        }
         return R"({"ok":true})";
     }
     std::optional<QJsonObject> response;

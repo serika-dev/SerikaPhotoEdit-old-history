@@ -41,7 +41,12 @@ bool MainWindow::focusDocument(Document *document) {
     return false;
 }
 void MainWindow::setAgentStatus(const QString &text) {
-    if (!text.isEmpty())
+    // showMessage() falls back to a modal box without a document; agent notes must never block.
+    if (!text.isEmpty() && currentDocument())
         showMessage(text);
+}
+void MainWindow::setAgentConnected(bool connected) {
+    m_agentConnected = connected;
+    refresh();
 }
 } // namespace serika

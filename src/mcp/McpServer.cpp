@@ -1053,32 +1053,16 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         }
         QElapsedTimer timer;
         timer.start();
-        const QImage mask = segmentSubject(document->composite(), chosen, &error);
+        // Select Subject reads the visible image; Remove Background reads only the target layer.
+        const QImage source =
+            name == "select_subject" ? document->composite() : layerSubjectSource(document, index);
+        const QImage mask = segmentSubject(source, chosen, &error);
         if (mask.isNull())
             return failure(error.isEmpty() ? "No subject was found." : error);
         if (name == "select_subject")
             document->setSelection(mask);
-        else {
-            // Build the mask from the subject through the normal Add Layer Mask path, multiply it
-            // with any existing mask, and leave the user's selection and pixel targeting untouched.
-            document->beginTransaction("Remove background");
-            const QImage previousSelection = document->state.selection;
-            const QImage previousMask = document->state.layers[index].mask;
-            document->setActiveIndex(index);
-            document->setSelection(mask);
-            document->addMask();
-            document->mutate("Remove background", [&] {
-                auto &layer = document->state.layers[index];
-                if (!previousMask.isNull() && previousMask.size() == layer.mask.size())
-                    for (int y = 0; y < layer.mask.height(); ++y)
-                        for (int x = 0; x < layer.mask.width(); ++x)
-                            setMaskSample(layer.mask, x, y,
-                                          maskSample(layer.mask, x, y) * maskSample(previousMask, x, y));
-                layer.maskTarget = false;
-                document->state.selection = previousSelection;
-            });
-            document->endTransaction();
-        }
+        else if (!applyBackgroundMask(document, index, mask, &error))
+            return failure(error);
         auto description = describe(id, document);
         description["engine"] = subjectEngineId(chosen);
         description["milliseconds"] = qint64(timer.elapsed());

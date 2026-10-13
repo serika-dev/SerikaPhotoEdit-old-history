@@ -2010,7 +2010,8 @@ void MainWindow::refresh() {
             for (auto *panel : m_docks)
                 panel->hide();
     }
-    setWindowTitle(d ? d->title + " — Serika PhotoEdit" : "Serika PhotoEdit");
+    setWindowTitle((d ? d->title + " — Serika PhotoEdit" : QString("Serika PhotoEdit")) +
+                   (m_agentConnected ? " · AI agent connected" : ""));
     m_center->setCurrentWidget(m_tabs->count() ? static_cast<QWidget *>(m_tabs) : m_home);
     if (m_commands.contains("Undo"))
         m_commands["Undo"]->setEnabled(d && d->canUndo());

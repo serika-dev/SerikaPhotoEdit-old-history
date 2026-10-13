@@ -67,6 +67,46 @@ QImage selectSubject(const QImage &image, SubjectEngine engine, QString *error) 
     const QImage mask = AiSegmenter::instance().segment(image, error);
     return mask.isNull() ? QImage() : normalizeMask(mask, coverageDepth(image));
 }
+QImage layerSubjectSource(const Document *document, int layerIndex) {
+    if (!document || layerIndex < 0 || layerIndex >= document->state.layers.size())
+        return {};
+    return document->layerImage(document->state.layers[layerIndex]);
+}
+bool applyBackgroundMask(Document *document, int layerIndex, const QImage &subject, QString *error) {
+    const auto fail = [&](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!document || layerIndex < 0 || layerIndex >= document->state.layers.size())
+        return fail("Select a layer first.");
+    if (document->state.layers[layerIndex].locked)
+        return fail("The layer is locked.");
+    const QSize size = layerSubjectSource(document, layerIndex).size();
+    if (subject.isNull() || size.isEmpty())
+        return fail("The layer has no pixels to separate.");
+    const QImage scaled = subject.size() == size
+                              ? subject
+                              : subject.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    document->mutate("Remove background", [&] {
+        Layer &layer = document->state.layers[layerIndex];
+        QImage mask = makeMask(size, document->state.bitDepth, 0);
+        const bool keep = !layer.mask.isNull() && layer.mask.size() == size && layer.maskLinked &&
+                          layer.maskOffset.isNull();
+        for (int y = 0; y < size.height(); ++y)
+            for (int x = 0; x < size.width(); ++x)
+                setMaskSample(mask, x, y,
+                              maskSample(scaled, x, y) * (keep ? maskSample(layer.mask, x, y) : 1.0));
+        layer.mask = mask;
+        layer.maskEnabled = true;
+        layer.maskTarget = false;
+        layer.maskLinked = true;
+        layer.maskOffset = {};
+        layer.maskDensity = 1;
+        layer.maskFeather = 0;
+    });
+    return true;
+}
 
 QImage ColorModelSubjectSelector::select(const QImage &input) const {
     if (input.isNull())

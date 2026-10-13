@@ -324,10 +324,12 @@ class McpTests : public QObject {
         QVERIFY(selected["has_selection"].toBool());
         const auto bounds = selected["selection_bounds"].toArray();
         QVERIFY(bounds[0].toInt() >= 30 && bounds[0].toInt() <= 40 && bounds[2].toInt() >= 45);
-        const auto removed = call(server, "remove_background",
-                                  {{"document_id", id}, {"layer_id", background}, {"engine", "fast"}});
+        // Remove Background segments the layer's own pixels, so the disc layer gets the mask.
+        const auto removed =
+            call(server, "remove_background", {{"document_id", id}, {"layer_id", disc}, {"engine", "fast"}});
         QVERIFY(!failed(removed));
-        QVERIFY(data(removed)["layers"].toArray().first().toObject()["has_mask"].toBool());
+        QVERIFY(data(removed)["layers"].toArray().last().toObject()["has_mask"].toBool());
+        QVERIFY(!data(removed)["layers"].toArray().first().toObject()["has_mask"].toBool());
         QCOMPARE(data(removed)["engine"].toString(), QString("fast"));
         // The user's selection survives the mask operation.
         QVERIFY(data(removed)["has_selection"].toBool());

@@ -58,7 +58,9 @@ bool MainWindow::runSubjectCommand(const QString &name) {
         return true;
     }
     QString error;
-    QImage mask = computeSubject(document->composite(), engine, &error);
+    const int layerIndex = document->state.activeIndex;
+    const QImage source = remove ? layerSubjectSource(document, layerIndex) : document->composite();
+    QImage mask = computeSubject(source, engine, &error);
     if (mask.isNull() && engine == SubjectEngine::Ai) {
         QMessageBox box(this);
         box.setIcon(QMessageBox::Information);
@@ -76,15 +78,17 @@ bool MainWindow::runSubjectCommand(const QString &name) {
         if (box.clickedButton() != fast)
             return true;
         engine = SubjectEngine::Fast;
-        mask = computeSubject(document->composite(), engine, &error);
+        mask = computeSubject(source, engine, &error);
     }
     if (mask.isNull()) {
         showMessage(error.isEmpty() ? "No subject was found." : error);
         return true;
     }
-    if (remove)
-        canvas->removeBackground(mask);
-    else
+    if (remove && !applyBackgroundMask(document, layerIndex, mask, &error)) {
+        showMessage(error);
+        return true;
+    }
+    if (!remove)
         canvas->setSubjectSelection(mask);
     showMessage(QString("%1 · %2 engine")
                     .arg(remove ? "Background removed" : "Subject selected",
