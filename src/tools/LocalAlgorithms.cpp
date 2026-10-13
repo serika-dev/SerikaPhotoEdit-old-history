@@ -1,9 +1,11 @@
 #include "LocalAlgorithms.h"
+#include "AiSegmenter.h"
 #include "document/Document.h"
 #include <QColor>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPoint>
+#include <QSettings>
 #include <QVector>
 #include <algorithm>
 #include <array>
@@ -42,6 +44,28 @@ QImage selectSubjectLocally(const QImage &image) {
                ? mask
                : mask.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     return normalizeMask(mask, coverageDepth(image));
+}
+QString subjectEngineId(SubjectEngine engine) { return engine == SubjectEngine::Ai ? "ai" : "fast"; }
+bool parseSubjectEngine(const QString &id, SubjectEngine *engine) {
+    const auto key = id.trimmed().toLower();
+    if (key != "ai" && key != "fast")
+        return false;
+    *engine = key == "ai" ? SubjectEngine::Ai : SubjectEngine::Fast;
+    return true;
+}
+SubjectEngine preferredSubjectEngine() {
+    SubjectEngine engine = SubjectEngine::Fast;
+    parseSubjectEngine(QSettings().value("ai/subjectEngine", "fast").toString(), &engine);
+    return engine;
+}
+void setPreferredSubjectEngine(SubjectEngine engine) {
+    QSettings().setValue("ai/subjectEngine", subjectEngineId(engine));
+}
+QImage selectSubject(const QImage &image, SubjectEngine engine, QString *error) {
+    if (engine == SubjectEngine::Fast)
+        return selectSubjectLocally(image);
+    const QImage mask = AiSegmenter::instance().segment(image, error);
+    return mask.isNull() ? QImage() : normalizeMask(mask, coverageDepth(image));
 }
 
 QImage ColorModelSubjectSelector::select(const QImage &input) const {

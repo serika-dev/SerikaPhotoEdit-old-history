@@ -21,6 +21,7 @@ class QToolButton;
 class QCheckBox;
 namespace serika {
 class BrushSettingsWidget;
+enum class SubjectEngine;
 class MainWindow : public QMainWindow {
     Q_OBJECT
   public:
@@ -36,6 +37,12 @@ class MainWindow : public QMainWindow {
     void runCommand(const QString &name);
     void saveWorkspace();
     ShortcutRegistry *shortcutRegistry() const { return m_shortcuts; }
+    // Live MCP sessions (mcp/McpLiveBridge) work on the documents in this window's tabs.
+    QList<Document *> openDocuments() const;
+    void adoptDocument(Document *document);
+    bool closeDocumentFor(Document *document, bool discard, QString *error);
+    bool focusDocument(Document *document);
+    void setAgentStatus(const QString &text);
 
   protected:
     void closeEvent(QCloseEvent *) override;
@@ -139,7 +146,11 @@ class MainWindow : public QMainWindow {
     void editFill(const QString &command);
     void filter(const QString &name, bool repeat = false);
     void develop(Document *document);
-    void preferences();
+    void preferences(const QString &initialPage = {});
+    // Select Subject / Remove Background with the Fast or local AI engine (MainWindowAi.cpp).
+    bool runSubjectCommand(const QString &name);
+    QImage computeSubject(const QImage &composite, SubjectEngine engine, QString *error);
+    bool downloadAiModel();
     void transformDialog();
     void layerStyles();
     void exportAs();

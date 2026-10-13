@@ -111,7 +111,7 @@ class LayerTree final : public QTreeWidget {
         case BelowItem:
             // Below an expanded group the line is drawn above its first child, so the drop lands inside.
             placement = target && target->isExpanded() && target->childCount() ? DropPlacement::Inside
-                                                                                : DropPlacement::Below;
+                                                                               : DropPlacement::Below;
             break;
         case OnItem:
             placement = DropPlacement::Inside;

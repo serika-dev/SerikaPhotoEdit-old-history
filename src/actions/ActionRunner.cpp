@@ -126,6 +126,18 @@ QImage withSelection(const QImage &oldImage, const QImage &changedImage, const D
 }
 } // namespace
 
+QStringList ActionRunner::filterNames() {
+    QStringList names;
+    for (const auto &filter : filters) {
+        QString title = filter;
+        for (qsizetype i = 0; i < title.size(); ++i)
+            if (i == 0 || title[i - 1] == ' ')
+                title[i] = title[i].toUpper();
+        names.append(title);
+    }
+    names.sort();
+    return names;
+}
 bool ActionRunner::execute(Document *doc, const QJsonObject &step, QString *error) {
     auto fail = [&](const QString &message) {
         if (error)

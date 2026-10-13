@@ -330,6 +330,8 @@ void MainWindow::buildMenus() {
     layer->addSeparator();
     command(layer, "Layer Style...");
     command(layer, "Add Layer Mask");
+    command(layer, "Remove Background");
+    command(layer, "Remove Background (AI)");
     command(layer, "Delete Layer Mask");
     command(layer, "Apply Layer Mask");
     command(layer, "Create Clipping Mask", QKeySequence("Ctrl+Alt+G"));
@@ -371,6 +373,7 @@ void MainWindow::buildMenus() {
     command(select, "Inverse", QKeySequence("Ctrl+Shift+I"));
     command(select, "All Layers", QKeySequence("Ctrl+Alt+A"));
     command(select, "Subject");
+    command(select, "Subject (AI)");
     command(select, "Color Range...");
     command(select, "Focus Area...");
     command(select, "Select and Mask...");
@@ -430,6 +433,9 @@ void MainWindow::buildMenus() {
     command(view, "Lock Guides")->setCheckable(true);
     command(view, "Snap")->setCheckable(true);
     command(view, "Extras")->setCheckable(true);
+    // Photoshop-style floating actions under the canvas; off unless the user asks for it.
+    command(view, "Contextual Task Bar")->setCheckable(true);
+    m_commands["Contextual Task Bar"]->setChecked(m_settings.value("contextTaskBar", false).toBool());
     command(view, "Screen Mode");
     auto *window = menuBar()->addMenu("Window");
     window->setObjectName("windowMenu");
@@ -926,9 +932,8 @@ void MainWindow::buildLayers(QWidget *parent) {
     locks->addWidget(new QLabel("Lock:"));
     const QHash<QString, QString> lockGlyphs{
         {"Alpha", "layer:transparency"}, {"Pixels", "Brush"}, {"Position", "Move"}};
-    const QHash<QString, QString> lockTips{{"Alpha", "Lock transparent pixels"},
-                                           {"Pixels", "Lock image pixels"},
-                                           {"Position", "Lock position"}};
+    const QHash<QString, QString> lockTips{
+        {"Alpha", "Lock transparent pixels"}, {"Pixels", "Lock image pixels"}, {"Position", "Lock position"}};
     for (const auto &s : QStringList{"Alpha", "Pixels", "Position"}) {
         auto *b = new QToolButton;
         setGlyph(b, lockGlyphs[s], 16);
@@ -1052,36 +1057,20 @@ void MainWindow::buildLayers(QWidget *parent) {
         // Applied after the drag loop returns so the tree is not rebuilt underneath QDrag.
         QTimer::singleShot(0, this, [this, ids, targetId, placement] {
             auto *d = currentDocument();
-            if (!d || ids.contains(targetId))
+            if (!d)
                 return;
-            const QSet<quint64> moving(ids.cbegin(), ids.cend());
-            auto siblings = [d, &moving](quint64 parent) {
-                QVector<quint64> result; // bottom-to-top, excluding the layers being moved
-                for (const auto &layer : d->state.layers)
-                    if (layer.parentId == parent && !moving.contains(layer.id))
-                        result.append(layer.id);
-                return result;
-            };
-            const int targetIndex = d->indexForId(targetId);
-            const Layer *target = targetIndex >= 0 ? &d->state.layers[targetIndex] : nullptr;
-            const bool container =
-                target && (target->kind == LayerKind::Group || target->kind == LayerKind::Artboard);
-            quint64 parent = 0, before = 0;
-            if (!target) {
-                const auto bottom = siblings(0);
-                before = bottom.isEmpty() ? 0 : bottom.first();
-            } else if (placement == LayerTree::DropPlacement::Inside && container) {
-                parent = targetId;
-            } else if (placement == LayerTree::DropPlacement::Below) {
-                parent = target->parentId;
-                before = targetId;
-            } else {
-                parent = target->parentId;
-                const auto row = siblings(parent);
-                const int at = row.indexOf(targetId);
-                before = at >= 0 && at + 1 < row.size() ? row[at + 1] : 0;
-            }
-            const auto result = reparentLayers(d, ids, parent, before);
+            const int index = d->indexForId(targetId);
+            const bool group = index >= 0 && (d->state.layers[index].kind == LayerKind::Group ||
+                                              d->state.layers[index].kind == LayerKind::Artboard);
+            // Dropping onto a non-group row lands above it, matching the drop indicator.
+            LayerDrop drop = LayerDrop::Above;
+            if (!targetId)
+                drop = LayerDrop::Bottom;
+            else if (placement == LayerTree::DropPlacement::Inside && group)
+                drop = LayerDrop::Inside;
+            else if (placement == LayerTree::DropPlacement::Below)
+                drop = LayerDrop::Below;
+            const auto result = moveLayers(d, ids, targetId, drop);
             if (!result.error.isEmpty())
                 showMessage(result.error);
             else if (result.changed)
@@ -1174,12 +1163,9 @@ void MainWindow::buildLayers(QWidget *parent) {
     auto *footer = new QHBoxLayout;
     footer->setSpacing(2);
     footer->addStretch();
-    const QList<QPair<QString, QString>> buttons = {{"layer:fx", "Layer Style..."},
-                                                    {"layer:mask", "Add Layer Mask"},
-                                                    {"layer:adjustment", ""},
-                                                    {"layer:folder", "Group Layers"},
-                                                    {"layer:new", "New Layer"},
-                                                    {"layer:trash", "Delete Layer"}};
+    const QList<QPair<QString, QString>> buttons = {
+        {"layer:fx", "Layer Style..."},   {"layer:mask", "Add Layer Mask"}, {"layer:adjustment", ""},
+        {"layer:folder", "Group Layers"}, {"layer:new", "New Layer"},       {"layer:trash", "Delete Layer"}};
     const QHash<QString, QString> footerTips{{"Layer Style...", "Add a layer style"},
                                              {"Add Layer Mask", "Add a mask"},
                                              {"Group Layers", "Group layers (Ctrl+G)"},
@@ -1587,10 +1573,13 @@ void MainWindow::buildDocks() {
         panel->show();
         previous = panel;
     }
-    const QHash<QString, QString> companions = {{"Swatches", "Color"},     {"Gradients", "Color"},
-                                                {"Styles", "Adjustments"}, {"Properties", "Adjustments"},
+    const QHash<QString, QString> companions = {{"Swatches", "Color"},
+                                                {"Gradients", "Color"},
+                                                {"Styles", "Adjustments"},
+                                                {"Properties", "Adjustments"},
                                                 {"Brush Settings", "Adjustments"},
-                                                {"Channels", "Layers"},    {"Paths", "Layers"}};
+                                                {"Channels", "Layers"},
+                                                {"Paths", "Layers"}};
     for (auto it = m_docks.begin(); it != m_docks.end(); ++it) {
         if (primary.contains(it.key()))
             continue;
@@ -1724,12 +1713,12 @@ void MainWindow::addDocument(Document *document) {
     struct ContextAction {
         QString label, command, glyph;
     };
-    for (const auto &action : QList<ContextAction>{{"Select subject", "Subject", "ctx:subject"},
-                                                   {"Remove background", "Remove Background",
-                                                    "ctx:remove-background"},
-                                                   {"Invert", "Inverse", "ctx:invert"},
-                                                   {"Deselect", "Deselect", "ctx:deselect"},
-                                                   {"Add mask", "Add Layer Mask", "layer:mask"}}) {
+    for (const auto &action :
+         QList<ContextAction>{{"Select subject", "Subject", "ctx:subject"},
+                              {"Remove background", "Remove Background", "ctx:remove-background"},
+                              {"Invert", "Inverse", "ctx:invert"},
+                              {"Deselect", "Deselect", "ctx:deselect"},
+                              {"Add mask", "Add Layer Mask", "layer:mask"}}) {
         if (action.command == "Add Layer Mask") {
             auto *separator = new QFrame(context);
             separator->setObjectName("contextSeparator");
@@ -1754,6 +1743,7 @@ void MainWindow::addDocument(Document *document) {
     };
     new ResizeHook(canvas, placeContext);
     placeContext();
+    context->setVisible(m_settings.value("contextTaskBar", false).toBool());
     auto update = [this, document, page, canvas, label, zoom, context, placeContext] {
         int index = m_tabs->indexOf(page);
         if (index >= 0)

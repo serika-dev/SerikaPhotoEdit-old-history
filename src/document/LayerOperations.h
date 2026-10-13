@@ -43,6 +43,11 @@ LayerOperationResult ungroupLayers(Document *document, const QVector<quint64> &i
 LayerOperationResult orderLayers(Document *document, const QVector<quint64> &ids, LayerOrder order);
 LayerOperationResult reparentLayers(Document *document, const QVector<quint64> &ids, quint64 parentId,
                                     quint64 beforeSiblingId = 0);
+// Where dropped layers go relative to a target: directly above or below it among its siblings,
+// inside it (groups and artboards only, at the top), or at the top/bottom of the whole stack.
+enum class LayerDrop { Above, Below, Inside, Top, Bottom };
+LayerOperationResult moveLayers(Document *document, const QVector<quint64> &ids, quint64 targetId,
+                                LayerDrop drop);
 // Placements contain every layer, in bottom-to-top sibling order. Reparenting preserves world position.
 LayerOperationResult applyLayerTree(Document *document, const QVector<LayerPlacement> &placements,
                                     const QVector<quint64> &movedIds);

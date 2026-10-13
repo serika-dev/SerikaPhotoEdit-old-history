@@ -1,10 +1,13 @@
 #include "io/FormatIO.h"
+#include "mcp/McpLiveBridge.h"
 #include "mcp/McpServer.h"
+#include "ui/MainWindow.h"
 #include <QBuffer>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QLocalSocket>
 #include <QProcess>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -30,6 +33,17 @@ QString create(McpServer &server) {
         .toString();
 }
 bool failed(const QJsonObject &response) { return result(response)["isError"].toBool(); }
+// 2026-07-28 requests carry their protocol version and identity in _meta instead of a handshake.
+QJsonObject modern(const QString &method, QJsonObject params = {}, const QString &version = "2026-07-28") {
+    params["_meta"] =
+        QJsonObject{{"io.modelcontextprotocol/protocolVersion", version},
+                    {"io.modelcontextprotocol/clientInfo", QJsonObject{{"name", "t"}, {"version", "1"}}},
+                    {"io.modelcontextprotocol/clientCapabilities", QJsonObject{}}};
+    return request(method, params);
+}
+QJsonObject modernCall(McpServer &server, const QString &name, QJsonObject args = {}) {
+    return server.handle(modern("tools/call", {{"name", name}, {"arguments", args}})).value();
+}
 } // namespace
 class McpTests : public QObject {
     Q_OBJECT
@@ -40,7 +54,8 @@ class McpTests : public QObject {
         QVERIFY(server.startupError().isEmpty());
         QCOMPARE(server.handle(request("tools/list"))->value("error").toObject()["code"].toInt(), -32002);
         initialize(server);
-        QCOMPARE(result(server.handle(request("tools/list")).value())["tools"].toArray().size(), 15);
+        QCOMPARE(result(server.handle(request("tools/list")).value())["tools"].toArray(),
+                 McpServer::toolDefinitions());
         QVERIFY(server.handle(request("ping"))->contains("result"));
         QCOMPARE(server.handle(request("unknown"))->value("error").toObject()["code"].toInt(), -32601);
         QVERIFY(!server.handle({{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"}}));
@@ -232,6 +247,184 @@ class McpTests : public QObject {
         QImage preview;
         QVERIFY(preview.loadFromData(QByteArray::fromBase64(content["data"].toString().toLatin1())));
         QCOMPARE(preview.pixelColor(4, 4), QColor(Qt::blue));
+    }
+    void statelessModernProtocol() {
+        QTemporaryDir root;
+        McpServer server(root.path());
+        // No initialize: discovery and tool calls work from the first request.
+        const auto discovered = result(server.handle(modern("server/discover")).value());
+        QCOMPARE(discovered["resultType"].toString(), QString("complete"));
+        QCOMPARE(discovered["supportedVersions"].toArray().first().toString(), QString("2026-07-28"));
+        QVERIFY(discovered["supportedVersions"].toArray().contains("2025-11-25"));
+        QVERIFY(discovered["capabilities"].toObject().contains("tools"));
+        QCOMPARE(discovered["_meta"]
+                     .toObject()["io.modelcontextprotocol/serverInfo"]
+                     .toObject()["name"]
+                     .toString(),
+                 QString("serika-photoedit"));
+        const auto listed = result(server.handle(modern("tools/list")).value());
+        QCOMPARE(listed["tools"].toArray(), McpServer::toolDefinitions());
+        QVERIFY(listed["ttlMs"].toInt() > 0);
+        QCOMPARE(listed["cacheScope"].toString(), QString("private"));
+        const auto created = modernCall(server, "create_document", {{"width", 16}, {"height", 16}});
+        QCOMPARE(result(created)["resultType"].toString(), QString("complete"));
+        QVERIFY(!data(created)["document_id"].toString().isEmpty());
+        // Unknown versions get the 2026-07-28 error listing what is supported.
+        const auto rejected =
+            server.handle(modern("tools/list", {}, "1900-01-01")).value()["error"].toObject();
+        QCOMPARE(rejected["code"].toInt(), -32022);
+        QCOMPARE(rejected["data"].toObject()["requested"].toString(), QString("1900-01-01"));
+        QVERIFY(rejected["data"].toObject()["supported"].toArray().contains("2026-07-28"));
+        // ping and initialize belong to the legacy handshake era.
+        QCOMPARE(server.handle(modern("ping")).value()["error"].toObject()["code"].toInt(), -32601);
+    }
+    void actionCatalogExamplesRun() {
+        // Every documented example must execute on a fresh document, so the catalog cannot drift.
+        QTemporaryDir root;
+        McpServer server(root.path());
+        initialize(server);
+        const auto catalog = data(call(server, "list_actions"));
+        QVERIFY(catalog["filters"].toArray().contains("Gaussian Blur"));
+        QVERIFY(catalog["adjustments"].toArray().contains("Levels"));
+        for (const auto &value : catalog["actions"].toArray()) {
+            const auto entry = value.toObject();
+            const auto id =
+                data(call(server, "create_document",
+                          {{"width", 320}, {"height", 240}, {"background", "#ff336699"}}))["document_id"]
+                    .toString();
+            QJsonArray steps;
+            if (entry["command"] == "merge down" || entry["command"] == "clear")
+                steps.append(QJsonObject{{"command", "new layer"}});
+            steps.append(entry["example"]);
+            const auto ran = call(server, "run_actions", {{"document_id", id}, {"steps", steps}});
+            QVERIFY2(!failed(ran), qPrintable(entry["command"].toString() + ": " +
+                                              QJsonDocument(result(ran)).toJson(QJsonDocument::Compact)));
+            call(server, "close_document", {{"document_id", id}, {"discard", true}});
+        }
+    }
+    void layerToolsAndBackgroundRemoval() {
+        QTemporaryDir root;
+        McpServer server(root.path());
+        initialize(server);
+        const auto id = data(call(server, "create_document",
+                                  {{"width", 120}, {"height", 90}, {"background", "#ffffff"}}))["document_id"]
+                            .toString();
+        // A dark disc on white: the fast engine must find it as the subject.
+        QJsonArray steps{
+            QJsonObject{{"command", "new layer"}, {"parameters", QJsonObject{{"name", "Disc"}}}},
+            QJsonObject{{"command", "ellipse"},
+                        {"parameters", QJsonObject{{"x", 35}, {"y", 20}, {"width", 50}, {"height", 50}}}},
+            QJsonObject{{"command", "fill"}, {"parameters", QJsonObject{{"color", "#202040"}}}},
+            QJsonObject{{"command", "deselect"}}};
+        QVERIFY(!failed(call(server, "run_actions", {{"document_id", id}, {"steps", steps}})));
+        auto described = data(call(server, "inspect_document", {{"document_id", id}}));
+        const auto background = described["layers"].toArray().first().toObject()["id"].toString();
+        const auto disc = described["active_layer_id"].toString();
+        const auto selected = data(call(server, "select_subject", {{"document_id", id}, {"engine", "fast"}}));
+        QVERIFY(selected["has_selection"].toBool());
+        const auto bounds = selected["selection_bounds"].toArray();
+        QVERIFY(bounds[0].toInt() >= 30 && bounds[0].toInt() <= 40 && bounds[2].toInt() >= 45);
+        const auto removed = call(server, "remove_background",
+                                  {{"document_id", id}, {"layer_id", background}, {"engine", "fast"}});
+        QVERIFY(!failed(removed));
+        QVERIFY(data(removed)["layers"].toArray().first().toObject()["has_mask"].toBool());
+        QCOMPARE(data(removed)["engine"].toString(), QString("fast"));
+        // The user's selection survives the mask operation.
+        QVERIFY(data(removed)["has_selection"].toBool());
+        // Duplicate, group, restack and delete through stable IDs.
+        const auto duplicated =
+            data(call(server, "duplicate_layers", {{"document_id", id}, {"layer_ids", QJsonArray{disc}}}));
+        const auto copy = duplicated["result_layer_ids"].toArray().first().toString();
+        QVERIFY(!copy.isEmpty() && copy != disc);
+        const auto grouped =
+            data(call(server, "group_layers",
+                      {{"document_id", id}, {"layer_ids", QJsonArray{disc, copy}}, {"name", "Discs"}}));
+        QCOMPARE(grouped["layers"].toArray().size(), 4);
+        const auto moved =
+            data(call(server, "move_layers",
+                      {{"document_id", id}, {"layer_ids", QJsonArray{background}}, {"position", "top"}}));
+        QCOMPARE(moved["layers"].toArray().last().toObject()["id"].toString(), background);
+        QVERIFY(failed(call(server, "move_layers",
+                            {{"document_id", id},
+                             {"layer_ids", QJsonArray{disc}},
+                             {"position", "inside"},
+                             {"target_layer_id", background}})));
+        const auto deleted =
+            data(call(server, "delete_layers", {{"document_id", id}, {"layer_ids", QJsonArray{copy}}}));
+        QCOMPARE(deleted["layers"].toArray().size(), 3);
+        QVERIFY(data(call(server, "history", {{"document_id", id}}))["steps"].toArray().size() >= 5);
+        // Layer previews are PNG image content.
+        const auto preview = result(call(server, "preview_layer", {{"document_id", id}, {"layer_id", disc}}));
+        QCOMPARE(preview["content"].toArray().first().toObject()["mimeType"].toString(),
+                 QString("image/png"));
+        QVERIFY(data(call(server, "ai_status")).contains("ai_ready"));
+    }
+    void placeImageAndTextEdits() {
+        QTemporaryDir root;
+        QImage logo(40, 30, QImage::Format_ARGB32);
+        logo.fill(QColor("#ff8800"));
+        QVERIFY(logo.save(root.filePath("logo.png")));
+        McpServer server(root.path());
+        initialize(server);
+        const auto id = create(server);
+        const auto placed =
+            data(call(server, "place_image",
+                      {{"document_id", id}, {"path", "logo.png"}, {"x", 5}, {"y", 6}, {"width", 20}}));
+        const auto layer = placed["layers"].toArray().last().toObject();
+        QCOMPARE(layer["name"].toString(), QString("logo"));
+        QCOMPARE(layer["x"].toDouble(), 5.0);
+        QVERIFY(failed(call(server, "place_image", {{"document_id", id}, {"path", "../outside.png"}})));
+        const auto text = data(call(server, "create_text_layer", {{"document_id", id}, {"text", "Wii"}}));
+        const auto textId = text["active_layer_id"].toString();
+        const auto edited = data(call(server, "set_layer_properties",
+                                      {{"document_id", id},
+                                       {"layer_id", textId},
+                                       {"text", "Mario Kart"},
+                                       {"color", "#e60012"},
+                                       {"x", 12}}));
+        QCOMPARE(edited["layers"].toArray().last().toObject()["text"].toString(), QString("Mario Kart"));
+        QVERIFY(failed(call(server, "set_layer_properties",
+                            {{"document_id", id}, {"layer_id", layer["id"].toString()}, {"text", "nope"}})));
+    }
+    void liveBridgeEditsWindowDocuments() {
+        // An attached session sees the window's tabs, and its edits land in those documents.
+        QTemporaryDir root;
+        MainWindow window;
+        window.openDemo();
+        McpLiveBridge bridge(&window);
+        QVERIFY2(bridge.listening(), qPrintable(bridge.errorString()));
+        QLocalSocket socket;
+        socket.connectToServer(McpServer::liveSocketName());
+        QVERIFY(socket.waitForConnected(3000));
+        const auto exchange = [&](const QJsonObject &message) {
+            socket.write(QJsonDocument(message).toJson(QJsonDocument::Compact) + "\n");
+            socket.flush();
+            QElapsedTimer timer;
+            timer.start();
+            while (!socket.canReadLine() && timer.elapsed() < 15000)
+                QTest::qWait(10);
+            return socket.canReadLine() ? QJsonDocument::fromJson(socket.readLine()).object() : QJsonObject{};
+        };
+        QVERIFY(exchange({{"serika_attach", 1}, {"workspace", root.path()}})["ok"].toBool());
+        const auto listed =
+            exchange(modern("tools/call", {{"name", "list_documents"}, {"arguments", QJsonObject{}}}));
+        const auto documents = data(listed)["documents"].toArray();
+        QCOMPARE(documents.size(), 1);
+        QVERIFY(documents.first().toObject()["active"].toBool());
+        const auto id = documents.first().toObject()["document_id"].toString();
+        Document *document = window.currentDocument();
+        const int before = document->state.layers.size();
+        const auto added = exchange(
+            modern("tools/call", {{"name", "create_text_layer"},
+                                  {"arguments", QJsonObject{{"document_id", id}, {"text", "Live"}}}}));
+        QVERIFY(!failed(added));
+        QCOMPARE(document->state.layers.size(), before + 1);
+        QCOMPARE(document->activeLayer()->text, QString("Live"));
+        QVERIFY(document->canUndo());
+        // Closing unsaved work requires an explicit discard, so the agent never triggers a Save prompt.
+        QVERIFY(failed(exchange(modern(
+            "tools/call", {{"name", "close_document"}, {"arguments", QJsonObject{{"document_id", id}}}}))));
+        QCOMPARE(window.openDocuments().size(), 1);
     }
     void stdioTransport() {
         QTemporaryDir root;

@@ -1,6 +1,7 @@
 #include "actions/ActionRunner.h"
 #include "compositor/GpuProcessor.h"
 #include "io/FormatIO.h"
+#include "mcp/McpLiveBridge.h"
 #include "mcp/McpServer.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
@@ -16,6 +17,7 @@
 #include <QTextStream>
 #include <QTimer>
 #include <memory>
+#include <serika/Version.h>
 #ifdef Q_OS_WIN
 #include <dwmapi.h>
 #include <windows.h>
@@ -75,7 +77,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QObject::connect(&app, &QCoreApplication::aboutToQuit, [] { GpuProcessor::instance().shutdown(); });
     app.setApplicationName("SerikaPhotoEdit");
-    app.setApplicationVersion("0.0.1");
+    app.setApplicationVersion(SERIKA_VERSION);
     app.setOrganizationName("Serika");
     app.setOrganizationDomain("serika.dev");
     initializeBrandFonts();
@@ -88,6 +90,10 @@ int main(int argc, char **argv) {
     parser.addOption({"demo", "Open the original welcome project"});
     parser.addOption({"mcp", "Run the local MCP server on stdin/stdout (requires --mcp-root)"});
     parser.addOption({"mcp-root", "Existing workspace directory allowed for MCP file access", "directory"});
+    parser.addOption(
+        {"attach", "With --mcp: edit the documents open in the Serika window (starts it if needed)"});
+    parser.addOption(
+        {"no-launch", "With --mcp --attach: fail instead of starting Serika when it is not running"});
     parser.addOption({"gpu", "Enable supported GPU processing operations, with CPU fallback"});
     parser.addOption({"gpu-info", "Print graphics device and processing diagnostics, then exit"});
     parser.addOption({"screenshot", "Save a window capture and exit", "path"});
@@ -107,7 +113,9 @@ int main(int argc, char **argv) {
             QTextStream(stderr) << "--mcp cannot be combined with --batch or document arguments.\n";
             return 2;
         }
-        const int result = McpServer::runStdio(parser.value("mcp-root"));
+        const int result = parser.isSet("attach")
+                               ? McpServer::runAttached(parser.value("mcp-root"), !parser.isSet("no-launch"))
+                               : McpServer::runStdio(parser.value("mcp-root"));
         GpuProcessor::instance().shutdown();
         return result;
     }
@@ -118,6 +126,8 @@ int main(int argc, char **argv) {
     }
     MainWindow window;
     window.show();
+    // Lets `--mcp --attach` agent sessions edit the documents open in this window.
+    McpLiveBridge liveBridge(&window);
 #ifdef Q_OS_WIN
     BOOL dark = app.palette().color(QPalette::Window).lightness() < 128;
     DwmSetWindowAttribute(reinterpret_cast<HWND>(window.winId()), 20, &dark, sizeof(dark));

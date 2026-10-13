@@ -17,6 +17,14 @@ class ColorModelSubjectSelector final : public ISubjectSelector {
 using LocalSubjectSelector = ColorModelSubjectSelector;
 void registerSubjectSelector(std::shared_ptr<ISubjectSelector> selector);
 QImage selectSubjectLocally(const QImage &image);
+// Subject/background engines. Fast is the low-resource colour model and always produces a mask;
+// Ai runs the optional local ONNX model and returns a null image with an error when unavailable.
+enum class SubjectEngine { Fast, Ai };
+QString subjectEngineId(SubjectEngine engine);
+bool parseSubjectEngine(const QString &id, SubjectEngine *engine);
+SubjectEngine preferredSubjectEngine();
+void setPreferredSubjectEngine(SubjectEngine engine);
+QImage selectSubject(const QImage &image, SubjectEngine engine, QString *error = nullptr);
 QImage selectFocusAreaLocally(const QImage &image, const QJsonObject &parameters = {});
 QImage synthesizePatches(const QImage &source, const QImage &mask);
 } // namespace serika

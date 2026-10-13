@@ -2750,8 +2750,8 @@ void CanvasView::bucket(QPoint point) {
     }
     applyImage(image, bounds.topLeft(), m_tool == "Magic Eraser");
 }
-void CanvasView::selectSubject() {
-    const QImage mask = selectSubjectLocally(m_document->composite());
+void CanvasView::selectSubject() { setSubjectSelection(selectSubjectLocally(m_document->composite())); }
+void CanvasView::setSubjectSelection(const QImage &mask) {
     if (!mask.isNull())
         m_document->setSelection(mask);
 }
@@ -2853,12 +2853,10 @@ void CanvasView::perspectiveCrop() {
     });
     fitToView();
 }
-void CanvasView::removeBackground() {
+void CanvasView::removeBackground() { removeBackground(selectSubjectLocally(m_document->composite())); }
+void CanvasView::removeBackground(const QImage &selection) {
     const Layer *active = m_document->activeLayer();
-    if (!active || active->locked)
-        return;
-    const QImage selection = selectSubjectLocally(m_document->composite());
-    if (selection.isNull())
+    if (!active || active->locked || selection.isNull())
         return;
     m_document->mutate("Remove background", [&] {
         Layer *layer = m_document->activeLayer();

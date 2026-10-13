@@ -2,6 +2,7 @@
 #include "actions/ActionRunner.h"
 #include "compositor/GpuProcessor.h"
 #include "io/FormatIO.h"
+#include "tools/AiSegmenter.h"
 #include "tools/LocalAlgorithms.h"
 #include "ui/dialogs/CurvesEditor.h"
 #include "ui/dialogs/FillEditorDialog.h"
@@ -28,6 +29,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -606,7 +608,7 @@ void MainWindow::layerStyles() {
                                            {"angle", 120}};
     d->mutate("Layer styles", [d, result] { d->activeLayer()->effects = result; });
 }
-void MainWindow::preferences() {
+void MainWindow::preferences(const QString &initialPage) {
     QDialog dialog(this);
     dialog.setWindowTitle("Preferences");
     dialog.resize(740, 550);
@@ -637,6 +639,9 @@ void MainWindow::preferences() {
     scale->addItems({"Automatic (per-monitor DPI)", "100%", "150%", "200%"});
     interface->addRow("UI scaling", scale);
     interface->addRow(new QLabel("Qt follows the display's DPI. Restart after changing system scale."));
+    auto *taskBar = new QCheckBox("Show the contextual task bar under the canvas");
+    taskBar->setChecked(m_settings.value("contextTaskBar", false).toBool());
+    interface->addRow(taskBar);
     auto *workspace = page("Workspace");
     auto *reset = new QPushButton("Reset current workspace");
     workspace->addRow(reset);
@@ -694,19 +699,74 @@ void MainWindow::preferences() {
     units->addRow("Ruler units", unit);
     auto *guides = page("Guides Grid Slices");
     guides->addRow(new QLabel("Cyan guides · 64 px grid · drag from ruler to add guide"));
-    auto *plugins = page("Plug-ins");
-    plugins->addRow(
-        new QLabel("On-device subject selector and neural model interfaces.\nNo neural model installed."));
+    auto *ai = page("AI");
+    auto *engine = new QComboBox;
+    engine->addItem("Fast: colour model, very low resource use", "fast");
+    engine->addItem("AI: BiRefNet on this computer (ONNX Runtime)", "ai");
+    engine->setCurrentIndex(preferredSubjectEngine() == SubjectEngine::Ai ? 1 : 0);
+    ai->addRow("Select Subject / Remove Background", engine);
+    auto *aiStatus = new QLabel;
+    aiStatus->setWordWrap(true);
+    aiStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    ai->addRow("Status", aiStatus);
+    auto *modelPath = new QLineEdit(m_settings.value("ai/modelPath").toString());
+    modelPath->setPlaceholderText(QDir::toNativeSeparators(AiSegmenter::defaultModelPath()));
+    ai->addRow("Model file (.onnx)", modelPath);
+    auto *runtimePath = new QLineEdit(m_settings.value("ai/runtimePath").toString());
+    runtimePath->setPlaceholderText("Automatic: next to Serika, or set the full library path");
+    ai->addRow("ONNX Runtime library", runtimePath);
+    const auto refreshAi = [aiStatus, modelPath, runtimePath] {
+        AiSegmenter::instance().setModelPath(modelPath->text().trimmed());
+        AiSegmenter::instance().setRuntimePath(runtimePath->text().trimmed());
+        const auto status = AiSegmenter::instance().status();
+        aiStatus->setText((status.ready() ? "✓ " : "") + status.message);
+    };
+    auto *download = new QPushButton("Download BiRefNet model (" +
+                                     QLocale().formattedDataSize(AiSegmenter::defaultModel().bytes) + ")…");
+    ai->addRow(download);
+    connect(download, &QPushButton::clicked, this, [this, refreshAi] {
+        downloadAiModel();
+        refreshAi();
+    });
+    connect(modelPath, &QLineEdit::editingFinished, this, refreshAi);
+    connect(runtimePath, &QLineEdit::editingFinished, this, refreshAi);
+    auto *allowAgents =
+        new QCheckBox("Allow AI agents (MCP --attach) to edit the documents open in this window");
+    allowAgents->setChecked(m_settings.value("mcp/allowLive", true).toBool());
+    ai->addRow(allowAgents);
+    auto *aiNote = new QLabel("Images never leave this computer. Fast works everywhere; AI needs the ONNX "
+                              "Runtime library (shipped with Windows builds) and the model file.");
+    aiNote->setWordWrap(true);
+    ai->addRow(aiNote);
+    refreshAi();
     auto *technology = page("Technology Previews");
     auto *technologyInfo =
         new QLabel("GPU image processing is opt-in in Performance. Unsupported operations use the CPU. ICC "
                    "CMYK proofing and export use a printer profile selected in View > Proof Setup.");
     technologyInfo->setWordWrap(true);
     technology->addRow(technologyInfo);
+    for (int index = 0; index < tabs->count(); ++index)
+        if (tabs->tabText(index) == initialPage)
+            tabs->setCurrentIndex(index);
     dialogButtons(dialog, outer);
-    if (dialog.exec() != QDialog::Accepted)
+    const auto restoreAiPaths = [this] {
+        AiSegmenter::instance().setModelPath(m_settings.value("ai/modelPath").toString());
+        AiSegmenter::instance().setRuntimePath(m_settings.value("ai/runtimePath").toString());
+    };
+    if (dialog.exec() != QDialog::Accepted) {
+        restoreAiPaths();
         return;
+    }
     applyTheme(theme->currentText());
+    SubjectEngine chosenEngine = SubjectEngine::Fast;
+    parseSubjectEngine(engine->currentData().toString(), &chosenEngine);
+    setPreferredSubjectEngine(chosenEngine);
+    m_settings.setValue("ai/modelPath", modelPath->text().trimmed());
+    m_settings.setValue("ai/runtimePath", runtimePath->text().trimmed());
+    m_settings.setValue("mcp/allowLive", allowAgents->isChecked());
+    restoreAiPaths();
+    if (taskBar->isChecked() != m_settings.value("contextTaskBar", false).toBool())
+        runCommand("Contextual Task Bar");
     m_settings.setValue("showHome", home->isChecked());
     m_settings.setValue("recovery", recovery->isChecked());
     m_settings.setValue("history", states->value());
