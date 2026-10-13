@@ -952,6 +952,33 @@ void Document::setSelection(const QImage &mask, const QString &operation) {
             return;
         }
         QImage old = maskAtSize(state.selection, state.size, depth);
+        // Integer masks combine row by row; max/min/difference give the same values as the float
+        // path below, which per-pixel helpers made take about a second per operation on large images.
+        const auto combine = [&](auto sample) {
+            using T = decltype(sample);
+            for (int y = 0; y < state.size.height(); ++y) {
+                T *row = reinterpret_cast<T *>(old.scanLine(y));
+                const T *in = reinterpret_cast<const T *>(incoming.constScanLine(y));
+                for (int x = 0; x < state.size.width(); ++x) {
+                    const int a = row[x], b = in[x];
+                    row[x] = T(operation == "add"         ? std::max(a, b)
+                               : operation == "subtract"  ? std::max(0, a - b)
+                               : operation == "intersect" ? std::min(a, b)
+                               : operation == "xor"       ? std::abs(a - b)
+                                                          : b);
+                }
+            }
+        };
+        if (old.format() == incoming.format() && old.format() == QImage::Format_Grayscale8) {
+            combine(uchar());
+            state.selection = old;
+            return;
+        }
+        if (old.format() == incoming.format() && old.format() == QImage::Format_Grayscale16) {
+            combine(quint16());
+            state.selection = old;
+            return;
+        }
         for (int y = 0; y < state.size.height(); ++y)
             for (int x = 0; x < state.size.width(); ++x) {
                 const qreal a = maskSample(old, x, y), b = maskSample(incoming, x, y);

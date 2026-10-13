@@ -1114,13 +1114,17 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         if (image.isNull())
             return failure("Could not decode the image: " + reader.errorString());
         if (args.contains("width") || args.contains("height")) {
-            const QSize size(args["width"].toInt(image.width()), args["height"].toInt(image.height()));
+            // One dimension scales the other proportionally; both set the exact size.
+            QSize size(args["width"].toInt(), args["height"].toInt());
+            if (!args.contains("height"))
+                size.setHeight(
+                    std::max(1, int(std::lround(double(size.width()) * image.height() / image.width()))));
+            if (!args.contains("width"))
+                size.setWidth(
+                    std::max(1, int(std::lround(double(size.height()) * image.width() / image.height()))));
             if (qint64(size.width()) * size.height() > MaxPixels)
                 return failure("The scaled image exceeds MCP limits.");
-            image = image.scaled(size,
-                                 args.contains("width") && args.contains("height") ? Qt::IgnoreAspectRatio
-                                                                                   : Qt::KeepAspectRatio,
-                                 Qt::SmoothTransformation);
+            image = image.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
         }
         if (const auto *active = document->activeLayer()) {
             const quint64 parent = active->kind == LayerKind::Group ? active->id : active->parentId;
@@ -1159,6 +1163,10 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                 document->cancelTransaction();
                 return failure(error);
             }
+            // A long action list must not freeze the window it is editing (Windows reports a hung
+            // app after a few seconds). User input stays blocked so it cannot interleave.
+            if (m_host->live() && QCoreApplication::instance())
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         }
         document->endTransaction();
         return textResult(describe(id, document));

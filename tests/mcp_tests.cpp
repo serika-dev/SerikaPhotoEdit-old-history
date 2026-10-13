@@ -376,6 +376,16 @@ class McpTests : public QObject {
         QCOMPARE(layer["name"].toString(), QString("logo"));
         QCOMPARE(layer["x"].toDouble(), 5.0);
         QVERIFY(failed(call(server, "place_image", {{"document_id", id}, {"path", "../outside.png"}})));
+        // One dimension scales the other proportionally (40 x 30 placed 60 tall becomes 80 x 60).
+        const auto tall =
+            data(call(server, "place_image", {{"document_id", id}, {"path", "logo.png"}, {"height", 60}}));
+        const auto tallId = tall["active_layer_id"].toString();
+        const auto layerPreview = result(call(
+            server, "preview_layer", {{"document_id", id}, {"layer_id", tallId}, {"max_dimension", 2048}}));
+        QImage tallImage;
+        QVERIFY(tallImage.loadFromData(QByteArray::fromBase64(
+            layerPreview["content"].toArray().first().toObject()["data"].toString().toLatin1())));
+        QVERIFY(tallImage.height() >= 59);
         const auto text = data(call(server, "create_text_layer", {{"document_id", id}, {"text", "Wii"}}));
         const auto textId = text["active_layer_id"].toString();
         const auto edited = data(call(server, "set_layer_properties",
