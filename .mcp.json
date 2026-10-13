@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "serika": {
+      "command": "python",
+      "args": ["scripts/serika-mcp.py"],
+      "env": {}
+    }
+  }
+}

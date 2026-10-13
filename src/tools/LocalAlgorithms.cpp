@@ -1,9 +1,11 @@
 #include "LocalAlgorithms.h"
+#include "AiSegmenter.h"
 #include "document/Document.h"
 #include <QColor>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPoint>
+#include <QSettings>
 #include <QVector>
 #include <algorithm>
 #include <array>
@@ -42,6 +44,68 @@ QImage selectSubjectLocally(const QImage &image) {
                ? mask
                : mask.scaled(image.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     return normalizeMask(mask, coverageDepth(image));
+}
+QString subjectEngineId(SubjectEngine engine) { return engine == SubjectEngine::Ai ? "ai" : "fast"; }
+bool parseSubjectEngine(const QString &id, SubjectEngine *engine) {
+    const auto key = id.trimmed().toLower();
+    if (key != "ai" && key != "fast")
+        return false;
+    *engine = key == "ai" ? SubjectEngine::Ai : SubjectEngine::Fast;
+    return true;
+}
+SubjectEngine preferredSubjectEngine() {
+    SubjectEngine engine = SubjectEngine::Fast;
+    parseSubjectEngine(QSettings().value("ai/subjectEngine", "fast").toString(), &engine);
+    return engine;
+}
+void setPreferredSubjectEngine(SubjectEngine engine) {
+    QSettings().setValue("ai/subjectEngine", subjectEngineId(engine));
+}
+QImage selectSubject(const QImage &image, SubjectEngine engine, QString *error) {
+    if (engine == SubjectEngine::Fast)
+        return selectSubjectLocally(image);
+    const QImage mask = AiSegmenter::instance().segment(image, error);
+    return mask.isNull() ? QImage() : normalizeMask(mask, coverageDepth(image));
+}
+QImage layerSubjectSource(const Document *document, int layerIndex) {
+    if (!document || layerIndex < 0 || layerIndex >= document->state.layers.size())
+        return {};
+    return document->layerImage(document->state.layers[layerIndex]);
+}
+bool applyBackgroundMask(Document *document, int layerIndex, const QImage &subject, QString *error) {
+    const auto fail = [&](const QString &message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!document || layerIndex < 0 || layerIndex >= document->state.layers.size())
+        return fail("Select a layer first.");
+    if (document->state.layers[layerIndex].locked)
+        return fail("The layer is locked.");
+    const QSize size = layerSubjectSource(document, layerIndex).size();
+    if (subject.isNull() || size.isEmpty())
+        return fail("The layer has no pixels to separate.");
+    const QImage scaled = subject.size() == size
+                              ? subject
+                              : subject.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    document->mutate("Remove background", [&] {
+        Layer &layer = document->state.layers[layerIndex];
+        QImage mask = makeMask(size, document->state.bitDepth, 0);
+        const bool keep = !layer.mask.isNull() && layer.mask.size() == size && layer.maskLinked &&
+                          layer.maskOffset.isNull();
+        for (int y = 0; y < size.height(); ++y)
+            for (int x = 0; x < size.width(); ++x)
+                setMaskSample(mask, x, y,
+                              maskSample(scaled, x, y) * (keep ? maskSample(layer.mask, x, y) : 1.0));
+        layer.mask = mask;
+        layer.maskEnabled = true;
+        layer.maskTarget = false;
+        layer.maskLinked = true;
+        layer.maskOffset = {};
+        layer.maskDensity = 1;
+        layer.maskFeather = 0;
+    });
+    return true;
 }
 
 QImage ColorModelSubjectSelector::select(const QImage &input) const {

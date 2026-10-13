@@ -21,6 +21,7 @@ class QToolButton;
 class QCheckBox;
 namespace serika {
 class BrushSettingsWidget;
+enum class SubjectEngine;
 class MainWindow : public QMainWindow {
     Q_OBJECT
   public:
@@ -36,6 +37,14 @@ class MainWindow : public QMainWindow {
     void runCommand(const QString &name);
     void saveWorkspace();
     ShortcutRegistry *shortcutRegistry() const { return m_shortcuts; }
+    // Live MCP sessions (mcp/McpLiveBridge) work on the documents in this window's tabs.
+    QList<Document *> openDocuments() const;
+    void adoptDocument(Document *document);
+    bool closeDocumentFor(Document *document, bool discard, QString *error);
+    bool focusDocument(Document *document);
+    // Never shows a dialog: a note in the document status line, plus a title-bar marker while connected.
+    void setAgentStatus(const QString &text);
+    void setAgentConnected(bool connected);
 
   protected:
     void closeEvent(QCloseEvent *) override;
@@ -91,12 +100,15 @@ class MainWindow : public QMainWindow {
     bool m_grid = false;
     bool m_guides = true;
     bool m_quickMask = false;
+    bool m_agentConnected = false;
     int m_screenMode = 0;
     QTimer m_recovery;
     QTimer m_refreshTimer;
     QSettings m_settings;
     QByteArray m_essentialState;
     QHash<QString, bool> m_visibilityBeforeHide;
+    // Layer visibility saved by Alt-clicking an eye, keyed by document address and soloed layer id.
+    QHash<QString, QHash<quint64, bool>> m_soloVisibility;
     QPointer<QWidget> m_draggedPage;
     void detachDocument(int index);
     void buildMenus();
@@ -137,7 +149,16 @@ class MainWindow : public QMainWindow {
     void editFill(const QString &command);
     void filter(const QString &name, bool repeat = false);
     void develop(Document *document);
-    void preferences();
+    void preferences(const QString &initialPage = {});
+    // Select Subject / Remove Background with the Fast or local AI engine (MainWindowAi.cpp).
+    bool runSubjectCommand(const QString &name);
+    QImage computeSubject(const QImage &composite, SubjectEngine engine, QString *error);
+    bool downloadAiModel();
+    bool downloadUpscaleModel(const QString &id);
+    // Downloads `url` to `target`, keeping it only when its SHA-256 matches.
+    bool downloadVerified(const QString &title, const QString &label, const QString &url,
+                          const QString &sha256, qint64 bytes, const QString &target);
+    void superResolution(bool layerOnly);
     void transformDialog();
     void layerStyles();
     void exportAs();

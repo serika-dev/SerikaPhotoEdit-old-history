@@ -47,7 +47,8 @@ Crop (`C`) previews changes until Enter applies them; Escape cancels. Free Trans
 - CPU filters, retained-source smart-filter stacks, selectable History Brush sources, Fade, action recording/playback and headless folder batch processing.
 - Configurable Photoshop-style shortcuts with conflict detection, tool scopes, held modifiers, tool cycles and JSON import/export.
 - Optional OpenGL shader adjustments/blur with CPU fallback; ICC CMYK proofing and 8/16-bit TIFF/separation export; rich text spans, paragraph layout and type on paths.
-- Local stdio MCP tools for documents, layers, previews, file export, action playback and undo/redo.
+- AI agents can drive the editor through MCP (protocol 2026-07-28): live sessions edit the open window with full undo, with tools for layers, masks, text, image placement, previews, actions and export.
+- Subject selection and background removal with a fast built-in engine or a local BiRefNet AI model through ONNX Runtime (optional, GPU via DirectML on Windows). Nothing is uploaded.
 - Multi-layer alignment/distribution and group operations; editable embedded/linked Smart Objects; brush dynamics with native preset libraries; draggable RGB/channel Curves; five gradient styles and tiled pattern fills.
 
 ## Build from source
@@ -95,6 +96,12 @@ Actions are JSON documents with a `steps` array. The [included example](examples
 Run this command from the extracted portable package. Batch writes SPE files, reports invalid parameters or unsupported commands, and rolls back failed playback. GUI recording captures supported commands and accepted settings, rather than arbitrary pointer gestures.
 
 On Linux, pass the same arguments to the package's `SerikaPhotoEdit` launcher. On macOS, the executable is `SerikaPhotoEdit.app/Contents/MacOS/SerikaPhotoEdit`.
+
+## For agents and contributors
+
+[AGENTS.md](AGENTS.md) is the guide for AI coding agents and humans alike: build and test commands,
+architecture, conventions and the release process. Versions, branches and the changelog are covered in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ## Contribute and license
 

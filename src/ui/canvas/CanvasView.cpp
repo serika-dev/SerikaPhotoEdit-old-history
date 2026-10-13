@@ -6,6 +6,7 @@
 #include "tools/LocalAlgorithms.h"
 #include <QApplication>
 #include <QDateTime>
+#include <QIconEngine>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QKeyEvent>
@@ -2749,8 +2750,8 @@ void CanvasView::bucket(QPoint point) {
     }
     applyImage(image, bounds.topLeft(), m_tool == "Magic Eraser");
 }
-void CanvasView::selectSubject() {
-    const QImage mask = selectSubjectLocally(m_document->composite());
+void CanvasView::selectSubject() { setSubjectSelection(selectSubjectLocally(m_document->composite())); }
+void CanvasView::setSubjectSelection(const QImage &mask) {
     if (!mask.isNull())
         m_document->setSelection(mask);
 }
@@ -2852,12 +2853,10 @@ void CanvasView::perspectiveCrop() {
     });
     fitToView();
 }
-void CanvasView::removeBackground() {
+void CanvasView::removeBackground() { removeBackground(selectSubjectLocally(m_document->composite())); }
+void CanvasView::removeBackground(const QImage &selection) {
     const Layer *active = m_document->activeLayer();
-    if (!active || active->locked)
-        return;
-    const QImage selection = selectSubjectLocally(m_document->composite());
-    if (selection.isNull())
+    if (!active || active->locked || selection.isNull())
         return;
     m_document->mutate("Remove background", [&] {
         Layer *layer = m_document->activeLayer();
@@ -3006,200 +3005,909 @@ QStringList toolNames() {
             "Zoom"};
 }
 
-QIcon toolIcon(const QString &name, QColor color) {
-    if (!color.isValid())
-        color = qApp ? qApp->palette().color(QPalette::Text) : QColor("#FAFAFA");
-    QPixmap pixmap(44, 44);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.scale(2, 2);
-    QPen pen(color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+namespace {
+// Layer panel glyphs use a "layer:" prefix so they never collide with tool names below.
+bool paintLayerGlyph(QPainter &painter, QPen pen, const QString &name, const QColor &color) {
+    if (name == "layer:eye") {
+        QPainterPath eye;
+        eye.moveTo(2, 11);
+        eye.cubicTo(5, 5.5, 17, 5.5, 20, 11);
+        eye.cubicTo(17, 16.5, 5, 16.5, 2, 11);
+        painter.drawPath(eye);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(11, 11), 2.4, 2.4);
+    } else if (name == "layer:lock") {
+        painter.drawRoundedRect(QRectF(5, 10, 12, 9), 1.5, 1.5);
+        painter.drawArc(QRectF(7.5, 4, 7, 10), 0, 180 * 16);
+        painter.drawLine(QPointF(7.5, 9), QPointF(7.5, 10));
+        painter.drawLine(QPointF(14.5, 9), QPointF(14.5, 10));
+    } else if (name == "layer:transparency") {
+        painter.drawRect(4, 4, 14, 14);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x)
+                painter.drawRect(QRectF(4 + x * 7 + (y % 2 ? 3.5 : 0), 4 + y * 7, 3.5, 3.5));
+        painter.drawRect(QRectF(7.5, 7.5, 3.5, 3.5));
+        painter.drawRect(QRectF(14.5, 7.5, 3.5, 3.5));
+        painter.drawRect(QRectF(4, 14.5, 3.5, 3.5));
+        painter.drawRect(QRectF(11, 14.5, 3.5, 3.5));
+    } else if (name == "layer:link") {
+        painter.drawRoundedRect(QRectF(2.5, 8, 9, 6), 3, 3);
+        painter.drawRoundedRect(QRectF(10.5, 8, 9, 6), 3, 3);
+    } else if (name == "layer:fx") {
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setItalic(true);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.drawText(QRectF(0, 0, 22, 22), Qt::AlignCenter, "fx");
+    } else if (name == "layer:mask") {
+        painter.drawRect(3, 5, 16, 12);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(11, 11), 3.5, 3.5);
+    } else if (name == "layer:adjustment") {
+        painter.drawEllipse(QPointF(11, 11), 7.5, 7.5);
+        QPainterPath half;
+        half.moveTo(11, 3.5);
+        half.arcTo(QRectF(3.5, 3.5, 15, 15), 90, 180);
+        half.closeSubpath();
+        painter.setBrush(color);
+        painter.drawPath(half);
+    } else if (name == "layer:folder") {
+        QPainterPath folder;
+        folder.moveTo(3, 6);
+        folder.lineTo(9, 6);
+        folder.lineTo(11, 8);
+        folder.lineTo(19, 8);
+        folder.lineTo(19, 17);
+        folder.lineTo(3, 17);
+        folder.closeSubpath();
+        painter.drawPath(folder);
+    } else if (name == "layer:new") {
+        painter.drawRect(4, 4, 14, 14);
+        painter.drawLine(11, 7.5, 11, 14.5);
+        painter.drawLine(7.5, 11, 14.5, 11);
+    } else if (name == "layer:trash") {
+        painter.drawLine(QPointF(4, 6), QPointF(18, 6));
+        painter.drawLine(QPointF(9, 6), QPointF(9.5, 3.5));
+        painter.drawLine(QPointF(9.5, 3.5), QPointF(12.5, 3.5));
+        painter.drawLine(QPointF(12.5, 3.5), QPointF(13, 6));
+        painter.drawPolyline(QPolygonF{{5.5, 6}, {6.5, 19}, {15.5, 19}, {16.5, 6}});
+        painter.drawLine(QPointF(9, 9), QPointF(9.3, 16));
+        painter.drawLine(QPointF(13, 9), QPointF(12.7, 16));
+    } else
+        return false;
+    Q_UNUSED(pen);
+    return true;
+}
+// Icons for the sixteen adjustments shown in the Adjustments panel ("adj:" + adjustment name).
+bool paintAdjustmentGlyph(QPainter &painter, const QString &name, const QColor &color) {
+    if (!name.startsWith("adj:"))
+        return false;
+    const QString kind = name.mid(4);
+    const QRectF box(4, 4, 14, 14);
+    if (kind == "Brightness/Contrast") {
+        painter.drawEllipse(QPointF(11, 11), 4, 4);
+        QPainterPath half;
+        half.moveTo(11, 7);
+        half.arcTo(QRectF(7, 7, 8, 8), 90, 180);
+        half.closeSubpath();
+        painter.fillPath(half, color);
+        for (int i = 0; i < 8; ++i) {
+            const qreal a = i * std::numbers::pi / 4;
+            painter.drawLine(QPointF(11 + 6.5 * std::cos(a), 11 + 6.5 * std::sin(a)),
+                             QPointF(11 + 8.5 * std::cos(a), 11 + 8.5 * std::sin(a)));
+        }
+    } else if (kind == "Levels") {
+        painter.drawLine(QPointF(3, 18.5), QPointF(19, 18.5));
+        const qreal heights[] = {3, 7, 11, 8, 12, 6, 3};
+        for (int i = 0; i < 7; ++i)
+            painter.drawLine(QPointF(5 + i * 2, 18.5), QPointF(5 + i * 2, 18.5 - heights[i]));
+    } else if (kind == "Curves") {
+        painter.drawRect(box);
+        QPainterPath curve;
+        curve.moveTo(4, 18);
+        curve.cubicTo(10, 18, 12, 4, 18, 4);
+        painter.drawPath(curve);
+    } else if (kind == "Exposure") {
+        painter.drawRect(box);
+        painter.drawLine(QPointF(4, 18), QPointF(18, 4));
+        painter.drawLine(QPointF(6.5, 8.5), QPointF(10.5, 8.5));
+        painter.drawLine(QPointF(8.5, 6.5), QPointF(8.5, 10.5));
+        painter.drawLine(QPointF(11.5, 14.5), QPointF(15.5, 14.5));
+    } else if (kind == "Vibrance") {
+        painter.drawPolygon(QPolygonF{{3.5, 5}, {18.5, 5}, {11, 18}});
+        painter.drawLine(QPointF(7.5, 9), QPointF(14.5, 9));
+    } else if (kind == "Hue/Saturation") {
+        for (int i = 0; i < 3; ++i) {
+            const qreal y = 6 + i * 5;
+            painter.drawLine(QPointF(3, y), QPointF(19, y));
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(i == 1 ? 14 : i == 0 ? 8 : 11, y), 1.8, 1.8);
+            painter.setBrush(Qt::NoBrush);
+        }
+    } else if (kind == "Color Balance") {
+        painter.drawLine(QPointF(11, 4), QPointF(11, 18));
+        painter.drawLine(QPointF(7, 18), QPointF(15, 18));
+        painter.drawLine(QPointF(4, 7), QPointF(18, 7));
+        painter.drawArc(QRectF(2, 8, 6, 6), 180 * 16, 180 * 16);
+        painter.drawArc(QRectF(14, 8, 6, 6), 180 * 16, 180 * 16);
+    } else if (kind == "Black & White") {
+        painter.drawRect(box);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{{4, 18}, {18, 4}, {18, 18}});
+    } else if (kind == "Photo Filter") {
+        painter.drawRoundedRect(QRectF(3, 7, 16, 11), 2, 2);
+        painter.drawPolyline(QPolygonF{{8, 7}, {9.5, 4.5}, {12.5, 4.5}, {14, 7}});
+        painter.drawEllipse(QPointF(11, 12.5), 3, 3);
+    } else if (kind == "Channel Mixer") {
+        painter.drawEllipse(QPointF(11, 8), 4.5, 4.5);
+        painter.drawEllipse(QPointF(8, 13.5), 4.5, 4.5);
+        painter.drawEllipse(QPointF(14, 13.5), 4.5, 4.5);
+    } else if (kind == "Color Lookup") {
+        painter.drawRect(box);
+        for (const qreal at : {8.67, 13.33}) {
+            painter.drawLine(QPointF(at, 4), QPointF(at, 18));
+            painter.drawLine(QPointF(4, at), QPointF(18, at));
+        }
+    } else if (kind == "Invert") {
+        painter.drawRect(box);
+        painter.fillRect(QRectF(4, 4, 7, 14), color);
+        painter.drawEllipse(QPointF(11, 11), 3.5, 3.5);
+    } else if (kind == "Posterize") {
+        painter.drawPolyline(
+            QPolygonF{{3, 19}, {3, 15}, {7, 15}, {7, 11}, {11, 11}, {11, 7}, {15, 7}, {15, 3}, {19, 3}});
+    } else if (kind == "Threshold") {
+        painter.drawRect(box);
+        painter.setBrush(color);
+        painter.drawPolygon(QPolygonF{{4, 18}, {4, 13}, {8, 9}, {11, 13}, {14, 8}, {18, 12}, {18, 18}});
+    } else if (kind == "Gradient Map") {
+        QLinearGradient gradient(4, 0, 18, 0);
+        QColor clear = color;
+        clear.setAlphaF(0);
+        gradient.setColorAt(0, clear);
+        gradient.setColorAt(1, color);
+        painter.fillRect(box, gradient);
+        painter.drawRect(box);
+    } else if (kind == "Selective Color") {
+        painter.drawEllipse(QPointF(11, 11), 7.5, 7.5);
+        for (int i = 0; i < 3; ++i) {
+            const qreal a = i * std::numbers::pi / 3;
+            painter.drawLine(QPointF(11 - 7.5 * std::cos(a), 11 - 7.5 * std::sin(a)),
+                             QPointF(11 + 7.5 * std::cos(a), 11 + 7.5 * std::sin(a)));
+        }
+    } else {
+        painter.drawRect(box);
+    }
+    return true;
+}
+// Tool glyphs are drawn on a 24-unit grid with 1.5-unit strokes and filled accents, in the spirit of
+// Photoshop's toolbar: one distinct silhouette per tool, variants marked with a small badge.
+namespace glyph {
+QPainterPath cursorArrow(QPointF at, qreal scale = 1.0) {
+    QPainterPath p;
+    const QPolygonF shape{{0, 0}, {0, 15}, {3.6, 11.6}, {6.2, 17.4}, {8.6, 16.3}, {6.0, 10.6}, {11, 10.6}};
+    QTransform t;
+    t.translate(at.x(), at.y());
+    t.scale(scale, scale);
+    p.addPolygon(t.map(shape));
+    p.closeSubpath();
+    return p;
+}
+QPainterPath brush() {
+    // Vertical brush pointing down, drawn around the origin; callers rotate it.
+    QPainterPath p;
+    p.addRoundedRect(QRectF(-1.5, -11, 3, 8.5), 1.5, 1.5);
+    return p;
+}
+QPainterPath brushTip() {
+    QPainterPath p;
+    p.addRect(QRectF(-2.6, -2.5, 5.2, 3));
+    p.moveTo(-2.6, 0.5);
+    p.lineTo(2.6, 0.5);
+    p.cubicTo(2.6, 4.5, 1.2, 7.5, 0, 10.5);
+    p.cubicTo(-1.2, 7.5, -2.6, 4.5, -2.6, 0.5);
+    return p;
+}
+QPainterPath drop(QPointF center, qreal size) {
+    // A teardrop whose round bottom has radius `size`, centred on `center`.
+    QPainterPath p;
+    const qreal x = center.x(), y = center.y();
+    p.moveTo(x, y - size * 2.1);
+    p.cubicTo(x + size * 0.4, y - size * 1.3, x + size, y - size * 0.7, x + size, y);
+    p.arcTo(QRectF(x - size, y - size, size * 2, size * 2), 0, -180);
+    p.cubicTo(x - size, y - size * 0.7, x - size * 0.4, y - size * 1.3, x, y - size * 2.1);
+    return p;
+}
+QPainterPath star(QPointF c, qreal outer, qreal inner, int points = 4) {
+    QPainterPath p;
+    for (int i = 0; i < points * 2; ++i) {
+        const qreal r = i % 2 ? inner : outer;
+        const qreal a = -std::numbers::pi / 2 + i * std::numbers::pi / points;
+        const QPointF pt(c.x() + r * std::cos(a), c.y() + r * std::sin(a));
+        i ? p.lineTo(pt) : p.moveTo(pt);
+    }
+    p.closeSubpath();
+    return p;
+}
+} // namespace glyph
+
+void paintToolGlyph(QPainter &painter, QPen pen, const QString &name, const QColor &color) {
+    if (paintLayerGlyph(painter, pen, name, color))
+        return;
+    if (paintAdjustmentGlyph(painter, name, color))
+        return;
+    painter.save();
+    painter.scale(22.0 / 24.0, 22.0 / 24.0);
+    pen.setWidthF(1.5);
     painter.setPen(pen);
-    painter.setBrush(Qt::NoBrush);
+    QColor soft = color;
+    soft.setAlphaF(color.alphaF() * 0.35);
+    QPen dashed = pen;
+    dashed.setCapStyle(Qt::FlatCap);
+    dashed.setJoinStyle(Qt::MiterJoin);
+    dashed.setDashPattern({1.6, 1.4});
+    const auto fill = [&](const QPainterPath &path, const QColor &with) { painter.fillPath(path, with); };
+    const auto solid = [&](const QPainterPath &path) {
+        fill(path, color);
+        painter.drawPath(path);
+    };
+    const auto rotated = [&](QPointF center, qreal degrees, const std::function<void()> &draw) {
+        painter.save();
+        painter.translate(center);
+        painter.rotate(degrees);
+        draw();
+        painter.restore();
+    };
+    const auto drawBrush = [&](QPointF center, qreal scale) {
+        rotated(center, 45, [&] {
+            painter.scale(scale, scale);
+            painter.drawPath(glyph::brush());
+            fill(glyph::brushTip(), color);
+        });
+    };
+    const auto drawPen = [&](QPointF center, qreal scale) {
+        rotated(center, 45, [&] {
+            painter.scale(scale, scale);
+            QPainterPath nib;
+            nib.moveTo(0, 10.5);
+            nib.lineTo(-5, 0);
+            nib.lineTo(-3, -5.5);
+            nib.lineTo(3, -5.5);
+            nib.lineTo(5, 0);
+            nib.closeSubpath();
+            painter.drawPath(nib);
+            painter.drawLine(QPointF(0, 10.5), QPointF(0, 2.5));
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(0, 1.2), 1.2, 1.2);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawLine(QPointF(-3.5, -8.5), QPointF(3.5, -8.5));
+        });
+    };
+    const auto drawEraser = [&](QPointF center, qreal scale) {
+        rotated(center, 45, [&] {
+            painter.scale(scale, scale);
+            painter.drawRoundedRect(QRectF(-4.5, -9.5, 9, 18), 1.5, 1.5);
+            QPainterPath tip;
+            tip.addRoundedRect(QRectF(-4.5, 1.5, 9, 7), 1.5, 1.5);
+            fill(tip, color);
+        });
+    };
+    const auto drawBandage = [&](QPointF center, qreal scale) {
+        rotated(center, -45, [&] {
+            painter.scale(scale, scale);
+            painter.drawRoundedRect(QRectF(-10, -4.2, 20, 8.4), 4.2, 4.2);
+            painter.drawRect(QRectF(-3.6, -4.2, 7.2, 8.4));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(color);
+            for (const QPointF dot :
+                 {QPointF(-1.4, -1.4), QPointF(1.4, -1.4), QPointF(-1.4, 1.4), QPointF(1.4, 1.4)})
+                painter.drawEllipse(dot, 0.75, 0.75);
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(pen);
+        });
+    };
+    const auto drawStamp = [&](bool pattern) {
+        painter.drawEllipse(QPointF(12, 5.5), 3.2, 3.2);
+        painter.drawLine(QPointF(10.5, 8.6), QPointF(10.5, 12));
+        painter.drawLine(QPointF(13.5, 8.6), QPointF(13.5, 12));
+        QPainterPath base;
+        base.addRoundedRect(QRectF(4, 12, 16, 5), 1.5, 1.5);
+        if (pattern) {
+            painter.drawPath(base);
+            for (int i = 0; i < 4; ++i)
+                painter.fillRect(QRectF(5 + i * 3.75, 20, 2.2, 2.2), color);
+        } else {
+            solid(base);
+            painter.drawLine(QPointF(5, 20.5), QPointF(19, 20.5));
+        }
+    };
+    const auto drawEyedropper = [&](QPointF center, qreal scale) {
+        rotated(center, 45, [&] {
+            painter.scale(scale, scale);
+            QPainterPath bulb;
+            bulb.addRoundedRect(QRectF(-2.8, -11, 5.6, 6.5), 2.8, 2.8);
+            fill(bulb, color);
+            painter.drawLine(QPointF(-4.2, -4.2), QPointF(4.2, -4.2));
+            painter.drawRect(QRectF(-1.8, -4.2, 3.6, 10));
+            painter.drawLine(QPointF(0, 5.8), QPointF(0, 10));
+        });
+    };
+    const auto drawLassoLoop = [&](const QRectF &loop) {
+        painter.drawEllipse(loop);
+        QPainterPath tail;
+        const QPointF knot(loop.left() + loop.width() * 0.2, loop.bottom() - loop.height() * 0.08);
+        tail.moveTo(knot);
+        tail.cubicTo(knot + QPointF(-2.5, 3), knot + QPointF(1.5, 4.5), knot + QPointF(-0.5, 7.5));
+        painter.drawPath(tail);
+        painter.setBrush(color);
+        painter.drawEllipse(knot, 1.3, 1.3);
+        painter.setBrush(Qt::NoBrush);
+    };
+    const auto drawTextT = [&](const QRectF &r) {
+        const qreal mid = r.center().x();
+        painter.drawLine(QPointF(r.left(), r.top()), QPointF(r.right(), r.top()));
+        painter.drawLine(QPointF(r.left(), r.top()), QPointF(r.left(), r.top() + 2.5));
+        painter.drawLine(QPointF(r.right(), r.top()), QPointF(r.right(), r.top() + 2.5));
+        painter.drawLine(QPointF(mid, r.top()), QPointF(mid, r.bottom()));
+        painter.drawLine(QPointF(mid - 3, r.bottom()), QPointF(mid + 3, r.bottom()));
+    };
+    const auto badgePlus = [&](QPointF c, bool plus) {
+        painter.drawLine(c + QPointF(-3, 0), c + QPointF(3, 0));
+        if (plus)
+            painter.drawLine(c + QPointF(0, -3), c + QPointF(0, 3));
+    };
+    const auto curvedArrow = [&](const QRectF &circle, int startDegrees, int spanDegrees) {
+        painter.drawArc(circle, startDegrees * 16, spanDegrees * 16);
+        const qreal end = (startDegrees + spanDegrees) * std::numbers::pi / 180;
+        const QPointF tip(circle.center().x() + circle.width() / 2 * std::cos(end),
+                          circle.center().y() - circle.height() / 2 * std::sin(end));
+        const qreal turn = spanDegrees > 0 ? 1 : -1;
+        const QPointF along(-std::sin(end) * turn, -std::cos(end) * turn);
+        const QPointF across(along.y(), -along.x());
+        QPainterPath head;
+        head.moveTo(tip + along * 2.6);
+        head.lineTo(tip - along * 0.8 + across * 2.4);
+        head.lineTo(tip - along * 0.8 - across * 2.4);
+        head.closeSubpath();
+        fill(head, color);
+    };
+
     if (name == "Move" || name == "Content-Aware Move") {
-        painter.drawLine(11, 3, 11, 19);
-        painter.drawLine(3, 11, 19, 11);
-        for (int i = 0; i < 4; ++i) {
+        const bool aware = name == "Content-Aware Move";
+        const QPointF c = aware ? QPointF(15, 15) : QPointF(12, 12);
+        const qreal r = aware ? 6.5 : 9.5, head = aware ? 2.2 : 3;
+        if (aware) {
             painter.save();
-            painter.translate(11, 11);
-            painter.rotate(i * 90);
-            painter.drawPolyline(QPolygonF{{-3, -5}, {0, -8}, {3, -5}});
+            painter.setPen(dashed);
+            painter.drawRect(QRectF(2.5, 2.5, 11, 11));
             painter.restore();
         }
-    } else if (name.contains("Marquee") || name == "Object Selection" || name == "Single Row" ||
-               name == "Single Column") {
-        pen.setStyle(Qt::DashLine);
-        painter.setPen(pen);
-        if (name.contains("Elliptical"))
-            painter.drawEllipse(4, 5, 14, 12);
-        else if (name == "Single Row")
-            painter.drawRect(3, 10, 16, 2);
-        else if (name == "Single Column")
-            painter.drawRect(10, 3, 2, 16);
-        else
-            painter.drawRect(4, 4, 14, 14);
-    } else if (name.contains("Lasso")) {
-        QPainterPath p;
-        p.moveTo(8, 16);
-        p.cubicTo(0, 12, 3, 3, 11, 4);
-        p.cubicTo(20, 4, 20, 14, 12, 16);
-        p.cubicTo(5, 18, 5, 14, 8, 13);
-        p.cubicTo(12, 11, 13, 18, 10, 20);
-        painter.drawPath(p);
-    } else if (name.contains("Crop")) {
-        painter.drawPolyline(QPolygonF{{6, 2}, {6, 16}, {20, 16}});
-        painter.drawPolyline(QPolygonF{{2, 6}, {16, 6}, {16, 20}});
-        painter.drawLine(7, 15, 18, 4);
-    } else if (name.contains("Eyedropper") || name == "Color Sampler") {
-        painter.drawPolygon(QPolygonF{{5, 15}, {14, 6}, {17, 9}, {8, 18}, {4, 18}});
-        painter.drawLine(12, 4, 19, 11);
-        painter.drawLine(15, 3, 20, 8);
-    } else if (name.contains("Healing") || name == "Patch") {
-        painter.save();
-        painter.translate(11, 11);
-        painter.rotate(-40);
-        painter.drawRoundedRect(-8, -4, 16, 8, 3, 3);
-        painter.drawRect(-3, -3, 6, 6);
-        painter.drawPoint(-6, 0);
-        painter.drawPoint(6, 0);
-        painter.restore();
-    } else if (name.contains("Brush") || name == "Pencil" || name == "Color Replacement") {
-        painter.drawPolygon(QPolygonF{{9, 13}, {17, 3}, {20, 6}, {12, 16}});
-        QPainterPath p;
-        p.moveTo(9, 12);
-        p.cubicTo(3, 12, 7, 18, 3, 19);
-        p.cubicTo(11, 20, 14, 16, 11, 14);
-        painter.drawPath(p);
-    } else if (name.contains("Stamp")) {
-        painter.drawRoundedRect(4, 15, 14, 4, 1, 1);
-        QPainterPath p;
-        p.moveTo(6, 15);
-        p.lineTo(8, 11);
-        p.lineTo(8, 7);
-        p.cubicTo(8, 2, 14, 2, 14, 7);
-        p.lineTo(14, 11);
-        p.lineTo(16, 15);
-        painter.drawPath(p);
-    } else if (name.contains("Eraser")) {
-        painter.drawPolygon(QPolygonF{{3, 13}, {12, 4}, {19, 11}, {11, 19}, {8, 19}});
-        painter.drawLine(7, 9, 15, 16);
-        painter.drawLine(11, 19, 20, 19);
-    } else if (name == "Gradient") {
-        QLinearGradient gradient(4, 0, 18, 0);
-        gradient.setColorAt(0, color);
-        gradient.setColorAt(1, Qt::transparent);
-        painter.setBrush(gradient);
-        painter.drawRect(4, 5, 14, 12);
-    } else if (name == "Paint Bucket") {
-        painter.drawPolygon(QPolygonF{{3, 11}, {10, 4}, {17, 11}, {10, 18}});
-        painter.drawLine(3, 11, 17, 11);
-        painter.drawLine(8, 3, 13, 8);
-        QPainterPath drop;
-        drop.moveTo(18, 12);
-        drop.cubicTo(14, 17, 17, 20, 19, 18);
-        drop.cubicTo(21, 17, 19, 14, 18, 12);
-        painter.drawPath(drop);
-    } else if (name == "Blur" || name == "Smudge") {
-        QPainterPath p;
-        p.moveTo(11, 3);
-        p.cubicTo(8, 8, 4, 11, 5, 15);
-        p.cubicTo(7, 22, 17, 20, 17, 14);
-        p.cubicTo(17, 10, 13, 6, 11, 3);
-        painter.drawPath(p);
-    } else if (name == "Sharpen")
-        painter.drawPolygon(QPolygonF{{11, 3}, {3, 19}, {19, 19}});
-    else if (name == "Dodge" || name == "Burn" || name == "Sponge") {
-        painter.drawEllipse(4, 4, 10, 10);
-        painter.drawLine(12, 12, 19, 19);
-        if (name == "Sponge") {
-            painter.drawPoint(7, 7);
-            painter.drawPoint(11, 8);
-            painter.drawPoint(8, 11);
+        painter.drawLine(c + QPointF(0, -r + head), c + QPointF(0, r - head));
+        painter.drawLine(c + QPointF(-r + head, 0), c + QPointF(r - head, 0));
+        for (int i = 0; i < 4; ++i)
+            rotated(c, i * 90, [&] {
+                QPainterPath tip;
+                tip.moveTo(0, -r);
+                tip.lineTo(-head, -r + head * 1.25);
+                tip.lineTo(head, -r + head * 1.25);
+                tip.closeSubpath();
+                solid(tip);
+            });
+    } else if (name == "Artboard") {
+        painter.drawRect(QRectF(7, 7, 10, 10));
+        for (const QPointF corner : {QPointF(7, 7), QPointF(17, 7), QPointF(7, 17), QPointF(17, 17)}) {
+            const qreal dx = corner.x() < 12 ? -4 : 4, dy = corner.y() < 12 ? -4 : 4;
+            painter.drawLine(corner, corner + QPointF(dx, 0));
+            painter.drawLine(corner, corner + QPointF(0, dy));
         }
-    } else if (name.contains("Pen") || name.contains("Anchor") || name == "Convert Point") {
-        painter.drawPolygon(QPolygonF{{4, 18}, {7, 7}, {17, 3}, {19, 5}, {15, 15}});
-        painter.drawLine(4, 18, 12, 10);
-        painter.drawEllipse(10, 8, 4, 4);
-        painter.drawLine(12, 18, 18, 12);
-    } else if (name.contains("Type")) {
-        painter.drawLine(4, 5, 18, 5);
-        painter.drawLine(11, 5, 11, 18);
-        painter.drawLine(7, 18, 15, 18);
-        painter.drawLine(4, 5, 4, 8);
-        painter.drawLine(18, 5, 18, 8);
-    } else if (name.contains("Selection")) {
-        painter.drawPolygon(QPolygonF{{5, 3}, {5, 18}, {9, 14}, {12, 20}, {15, 18}, {12, 12}, {18, 12}});
-    } else if (name == "Ellipse")
-        painter.drawEllipse(4, 4, 14, 14);
-    else if (name == "Triangle")
-        painter.drawPolygon(QPolygonF{{11, 3}, {3, 19}, {19, 19}});
-    else if (name == "Polygon" || name == "Custom Shape")
-        painter.drawPath(polygonShape(QRectF(3, 3, 16, 16), 6));
-    else if (name == "Line")
-        painter.drawLine(4, 18, 18, 4);
-    else if (name == "Hand") {
+    } else if (name == "Rectangular Marquee") {
+        painter.setPen(dashed);
+        painter.drawRect(QRectF(3.75, 3.75, 16.5, 16.5));
+    } else if (name == "Elliptical Marquee") {
+        painter.setPen(dashed);
+        painter.drawEllipse(QRectF(3, 5, 18, 14));
+    } else if (name == "Single Row" || name == "Single Column") {
+        const bool row = name == "Single Row";
+        painter.setPen(dashed);
+        painter.drawRect(row ? QRectF(2.75, 9.75, 18.5, 4.5) : QRectF(9.75, 2.75, 4.5, 18.5));
+        painter.setPen(pen);
+        painter.drawLine(row ? QLineF(5, 12, 19, 12) : QLineF(12, 5, 12, 19));
+    } else if (name == "Lasso") {
+        drawLassoLoop(QRectF(4, 3, 17, 11));
+    } else if (name == "Polygonal Lasso") {
+        painter.drawPolygon(QPolygonF{{5, 13}, {7, 3.5}, {15, 3}, {21, 8.5}, {16, 14}});
+        QPainterPath tail;
+        tail.moveTo(5, 13);
+        tail.cubicTo(2.5, 16, 6.5, 17.5, 4.5, 21);
+        painter.drawPath(tail);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(5, 13), 1.3, 1.3);
+        painter.setBrush(Qt::NoBrush);
+    } else if (name == "Magnetic Lasso") {
+        drawLassoLoop(QRectF(2.5, 2.5, 14, 9.5));
+        QPainterPath magnet;
+        magnet.moveTo(14, 13);
+        magnet.lineTo(14, 17.5);
+        magnet.arcTo(QRectF(14, 14.5, 7, 7), 180, 180);
+        magnet.lineTo(21, 13);
+        painter.drawPath(magnet);
+        painter.fillRect(QRectF(13.25, 12.5, 1.5, 2.5), color);
+        painter.fillRect(QRectF(20.25, 12.5, 1.5, 2.5), color);
+    } else if (name == "Object Selection") {
+        painter.setPen(dashed);
+        painter.drawPolyline(QPolygonF{{12, 3.75}, {3.75, 3.75}, {3.75, 16}, {9, 16}});
+        painter.drawPolyline(QPolygonF{{16, 3.75}, {20.25, 3.75}, {20.25, 9}});
+        painter.setPen(pen);
+        solid(glyph::cursorArrow({11, 8.5}, 0.82));
+    } else if (name == "Quick Selection") {
+        painter.save();
+        painter.setPen(dashed);
+        painter.drawEllipse(QRectF(2.5, 2.5, 11, 11));
+        painter.restore();
+        drawBrush({15.5, 15.5}, 0.62);
+    } else if (name == "Magic Wand") {
+        QPen thick = pen;
+        thick.setWidthF(2.4);
+        painter.setPen(thick);
+        painter.drawLine(QPointF(4, 20), QPointF(13.5, 10.5));
+        painter.setPen(pen);
+        solid(glyph::star({16.5, 7.5}, 4.6, 1.4));
+        solid(glyph::star({20.5, 14}, 2.2, 0.7));
+        solid(glyph::star({9.5, 3.5}, 2.2, 0.7));
+    } else if (name == "Crop" || name == "Perspective Crop") {
+        painter.drawPolyline(QPolygonF{{6.5, 2}, {6.5, 17.5}, {22, 17.5}});
+        painter.drawPolyline(QPolygonF{{2, 6.5}, {17.5, 6.5}, {17.5, 22}});
+        if (name == "Perspective Crop") {
+            painter.setPen(QPen(color, 1.0));
+            painter.drawLine(QPointF(10, 6.5), QPointF(9.5, 17.5));
+            painter.drawLine(QPointF(14, 6.5), QPointF(14.5, 17.5));
+        }
+    } else if (name == "Slice" || name == "Slice Select") {
+        const bool select = name == "Slice Select";
+        if (select) {
+            painter.save();
+            painter.translate(-1.5, -1.5);
+            painter.scale(0.78, 0.78);
+        }
+        QPainterPath blade;
+        blade.moveTo(3.5, 20.5);
+        blade.lineTo(15.5, 8.5);
+        blade.cubicTo(18, 6, 20, 4, 21, 3.5);
+        blade.cubicTo(20.5, 6.5, 18.5, 9.5, 8.5, 20.5);
+        blade.closeSubpath();
+        painter.drawPath(blade);
+        painter.drawLine(QPointF(3.5, 20.5), QPointF(2, 22));
+        if (select) {
+            painter.restore();
+            solid(glyph::cursorArrow({13, 10}, 0.72));
+        }
+    } else if (name == "Frame") {
+        painter.drawRect(QRectF(3.75, 3.75, 16.5, 16.5));
+        painter.setPen(QPen(color, 1.0));
+        painter.drawLine(QPointF(3.75, 3.75), QPointF(20.25, 20.25));
+        painter.drawLine(QPointF(20.25, 3.75), QPointF(3.75, 20.25));
+    } else if (name == "Eyedropper" || name == "3D Material Eyedropper") {
+        drawEyedropper({12, 12}, 1.0);
+    } else if (name == "Color Sampler") {
+        drawEyedropper({14, 10}, 0.8);
+        painter.drawEllipse(QPointF(6.5, 17.5), 3.2, 3.2);
+        painter.drawLine(QPointF(6.5, 12.5), QPointF(6.5, 22.5));
+        painter.drawLine(QPointF(1.5, 17.5), QPointF(11.5, 17.5));
+    } else if (name == "Ruler") {
+        rotated({12, 12}, -45, [&] {
+            painter.drawRect(QRectF(-11, -3.5, 22, 7));
+            for (int i = 0; i < 6; ++i) {
+                const qreal x = -8 + i * 3.2;
+                painter.drawLine(QPointF(x, -3.5), QPointF(x, i % 2 ? -1.5 : 0));
+            }
+        });
+    } else if (name == "Note") {
+        painter.drawPolygon(QPolygonF{{4, 3}, {20, 3}, {20, 15}, {14, 21}, {4, 21}});
+        painter.drawPolyline(QPolygonF{{14, 21}, {14, 15}, {20, 15}});
+        painter.drawLine(QPointF(7.5, 7.5), QPointF(16.5, 7.5));
+        painter.drawLine(QPointF(7.5, 11), QPointF(16.5, 11));
+    } else if (name == "Count") {
+        solid(glyph::cursorArrow({3, 3}, 0.8));
+        QFont font = painter.font();
+        font.setPixelSize(11);
+        font.setBold(true);
+        painter.setFont(font);
+        painter.drawText(QRectF(10, 10, 14, 13), Qt::AlignCenter, "12");
+    } else if (name == "Spot Healing" || name == "Healing Brush") {
+        drawBandage({12, 12}, name == "Spot Healing" ? 0.9 : 1.0);
+        if (name == "Spot Healing") {
+            painter.setPen(dashed);
+            painter.drawArc(QRectF(1.5, 1.5, 21, 21), 100 * 16, 70 * 16);
+            painter.drawArc(QRectF(1.5, 1.5, 21, 21), 280 * 16, 70 * 16);
+        }
+    } else if (name == "Patch") {
+        painter.drawRoundedRect(QRectF(3.5, 3.5, 17, 17), 3, 3);
+        painter.setPen(dashed);
+        painter.drawRoundedRect(QRectF(7, 7, 10, 10), 1, 1);
+    } else if (name == "Red Eye") {
+        QPainterPath eye;
+        eye.moveTo(2, 13);
+        eye.cubicTo(6, 6.5, 18, 6.5, 22, 13);
+        eye.cubicTo(18, 19.5, 6, 19.5, 2, 13);
+        painter.drawPath(eye);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 13), 3, 3);
+        painter.setBrush(Qt::NoBrush);
+        badgePlus({19, 4}, true);
+    } else if (name == "Brush") {
+        drawBrush({12, 12}, 1.0);
+    } else if (name == "Pencil") {
+        rotated({12, 12}, 45, [&] {
+            painter.drawRect(QRectF(-2.4, -10.5, 4.8, 13));
+            painter.drawLine(QPointF(-2.4, -7.5), QPointF(2.4, -7.5));
+            QPainterPath cone;
+            cone.moveTo(-2.4, 2.5);
+            cone.lineTo(2.4, 2.5);
+            cone.lineTo(0, 9.5);
+            cone.closeSubpath();
+            painter.drawPath(cone);
+            QPainterPath lead;
+            lead.moveTo(-0.9, 6.9);
+            lead.lineTo(0.9, 6.9);
+            lead.lineTo(0, 9.5);
+            lead.closeSubpath();
+            fill(lead, color);
+        });
+    } else if (name == "Color Replacement") {
+        drawBrush({14, 10}, 0.78);
+        painter.drawEllipse(QPointF(6.5, 17.5), 4, 4);
+        QPainterPath half;
+        half.moveTo(6.5, 13.5);
+        half.arcTo(QRectF(2.5, 13.5, 8, 8), 90, 180);
+        half.closeSubpath();
+        fill(half, color);
+    } else if (name == "Mixer Brush") {
+        drawBrush({11, 11}, 0.82);
+        solid(glyph::drop({18.5, 18.5}, 2.6));
+    } else if (name == "Clone Stamp" || name == "Pattern Stamp") {
+        drawStamp(name == "Pattern Stamp");
+    } else if (name == "History Brush" || name == "Art History Brush") {
+        drawBrush({15, 9}, 0.72);
+        if (name == "History Brush") {
+            curvedArrow(QRectF(2.5, 12.5, 9, 9), 60, 270);
+        } else {
+            QPainterPath curl;
+            curl.moveTo(2.5, 20);
+            curl.cubicTo(2.5, 13, 9.5, 13, 8.5, 17);
+            curl.cubicTo(7.5, 21, 3.5, 18, 6.5, 14.5);
+            painter.drawPath(curl);
+        }
+    } else if (name == "Eraser") {
+        drawEraser({12, 11}, 1.0);
+        painter.drawLine(QPointF(9, 21.5), QPointF(21, 21.5));
+    } else if (name == "Background Eraser") {
+        drawEraser({11, 10}, 0.85);
+        painter.setPen(dashed);
+        painter.drawEllipse(QPointF(18, 18), 3.5, 3.5);
+    } else if (name == "Magic Eraser") {
+        drawEraser({11, 12}, 0.85);
+        solid(glyph::star({18.5, 5}, 3.6, 1.1));
+    } else if (name == "Gradient") {
+        QLinearGradient gradient(4, 0, 20, 0);
+        gradient.setColorAt(0, color);
+        QColor clear = color;
+        clear.setAlphaF(0);
+        gradient.setColorAt(1, clear);
+        painter.fillRect(QRectF(3.75, 5.75, 16.5, 12.5), gradient);
+        painter.drawRoundedRect(QRectF(3.75, 5.75, 16.5, 12.5), 1, 1);
+    } else if (name == "Paint Bucket") {
+        rotated({11, 11}, -40, [&] {
+            QPainterPath bucket;
+            bucket.moveTo(-6, -3);
+            bucket.lineTo(6, -3);
+            bucket.lineTo(5, 7);
+            bucket.lineTo(-5, 7);
+            bucket.closeSubpath();
+            painter.drawPath(bucket);
+            painter.drawArc(QRectF(-4.5, -9, 9, 10), 0, 180 * 16);
+            QPainterPath paint;
+            paint.addRect(QRectF(-6, -3, 12, 3.2));
+            fill(paint, color);
+        });
+        solid(glyph::drop({19.5, 18.5}, 2.4));
+    } else if (name == "Blur") {
+        const auto water = glyph::drop({12, 15}, 6.2);
+        painter.drawPath(water);
+        painter.drawArc(QRectF(8.2, 11.5, 7.6, 7.6), 200 * 16, 70 * 16);
+    } else if (name == "Sharpen") {
+        QPainterPath cone;
+        cone.moveTo(12, 2.5);
+        cone.lineTo(18.5, 21);
+        cone.lineTo(5.5, 21);
+        cone.closeSubpath();
+        painter.drawPath(cone);
+        QPainterPath half;
+        half.moveTo(12, 2.5);
+        half.lineTo(12, 21);
+        half.lineTo(5.5, 21);
+        half.closeSubpath();
+        fill(half, color);
+    } else if (name == "Smudge") {
+        rotated({12, 12}, -45, [&] {
+            painter.drawRoundedRect(QRectF(-2, -11, 4, 10), 2, 2);
+            QPainterPath hand;
+            hand.moveTo(-2, -2);
+            hand.lineTo(-2, 3);
+            hand.cubicTo(-6, 2, -7, 5, -4.5, 7);
+            hand.lineTo(-1, 10);
+            hand.lineTo(6, 10);
+            hand.cubicTo(8, 7, 8, 3, 7, -1);
+            hand.cubicTo(6, -2, 4.5, -2, 4, -0.5);
+            hand.cubicTo(3.5, -2.5, 2, -2.5, 2, -1);
+            painter.drawPath(hand);
+        });
+    } else if (name == "Dodge") {
+        painter.setBrush(soft);
+        painter.drawEllipse(QPointF(9, 9), 6, 6);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawLine(QPointF(13.2, 13.2), QPointF(21, 21));
+    } else if (name == "Burn") {
+        QPainterPath flame;
+        flame.moveTo(12, 2.5);
+        flame.cubicTo(13, 7, 19, 9, 19, 15);
+        flame.cubicTo(19, 19, 16, 21.5, 12, 21.5);
+        flame.cubicTo(8, 21.5, 5, 19, 5, 15);
+        flame.cubicTo(5, 11.5, 7.5, 10, 8.5, 7.5);
+        flame.cubicTo(9.5, 10, 10.5, 10.5, 11, 10.5);
+        flame.cubicTo(11, 8, 11, 5, 12, 2.5);
+        painter.drawPath(flame);
+        fill(glyph::drop({12, 17.2}, 2.8), color);
+    } else if (name == "Sponge") {
+        painter.drawRoundedRect(QRectF(3, 7, 18, 11.5), 3.5, 3.5);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        for (const QPointF hole : {QPointF(8, 11), QPointF(13, 10.5), QPointF(17, 13), QPointF(10, 15)})
+            painter.drawEllipse(hole, 1.1, 1.1);
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(pen);
+    } else if (name == "Pen") {
+        drawPen({12, 12}, 1.0);
+    } else if (name == "Freeform Pen") {
+        drawPen({14.5, 9.5}, 0.75);
+        QPainterPath squiggle;
+        squiggle.moveTo(2, 21);
+        squiggle.cubicTo(4, 15, 7, 23, 9, 17);
+        painter.drawPath(squiggle);
+    } else if (name == "Curvature Pen") {
+        drawPen({14.5, 9.5}, 0.75);
+        painter.drawArc(QRectF(1.5, 14, 11, 12), 30 * 16, 120 * 16);
+        painter.fillRect(QRectF(5.5, 13, 2.5, 2.5), color);
+    } else if (name == "Add Anchor" || name == "Delete Anchor") {
+        drawPen({13, 11}, 0.82);
+        badgePlus({5, 19}, name == "Add Anchor");
+    } else if (name == "Convert Point") {
+        painter.drawPolyline(QPolygonF{{3.5, 20}, {12, 5}, {20.5, 20}});
+        painter.fillRect(QRectF(10.25, 3.25, 3.5, 3.5), color);
+    } else if (name == "Horizontal Type" || name == "Horizontal Type Mask") {
+        if (name.endsWith("Mask"))
+            painter.setPen(dashed);
+        drawTextT(QRectF(5, 4, 14, 16));
+    } else if (name == "Vertical Type" || name == "Vertical Type Mask") {
+        if (name.endsWith("Mask"))
+            painter.setPen(dashed);
+        drawTextT(QRectF(3, 4, 11, 15));
+        painter.setPen(pen);
+        painter.drawLine(QPointF(19.5, 4), QPointF(19.5, 19));
+        painter.drawPolyline(QPolygonF{{17, 16.5}, {19.5, 19.5}, {22, 16.5}});
+    } else if (name == "Path Selection") {
+        solid(glyph::cursorArrow({6, 3}, 1.05));
+    } else if (name == "Direct Selection") {
+        painter.drawPath(glyph::cursorArrow({6, 3}, 1.05));
+    } else if (name == "Rectangle") {
+        painter.drawRoundedRect(QRectF(3.75, 5.75, 16.5, 12.5), 1.5, 1.5);
+    } else if (name == "Ellipse") {
+        painter.drawEllipse(QRectF(3.75, 4.75, 16.5, 14.5));
+    } else if (name == "Triangle") {
+        painter.drawPolygon(QPolygonF{{12, 3.5}, {21, 19.5}, {3, 19.5}});
+    } else if (name == "Polygon") {
+        painter.drawPath(polygonShape(QRectF(3, 3, 18, 18), 6));
+    } else if (name == "Line") {
+        painter.drawLine(QPointF(5, 19), QPointF(19, 5));
+        painter.fillRect(QRectF(3, 17, 4, 4), color);
+        painter.fillRect(QRectF(17, 3, 4, 4), color);
+    } else if (name == "Custom Shape") {
+        painter.drawPath(glyph::star({12, 12.8}, 9.5, 4, 5));
+    } else if (name == "Hand") {
         QPainterPath p;
-        p.moveTo(7, 18);
-        p.lineTo(3, 11);
-        p.cubicTo(3, 8, 6, 10, 7, 11);
-        p.lineTo(7, 5);
-        p.cubicTo(7, 3, 9, 3, 9, 5);
-        p.lineTo(9, 10);
-        p.lineTo(10, 3);
-        p.cubicTo(10, 1, 12, 1, 12, 4);
-        p.lineTo(12, 10);
-        p.lineTo(13, 4);
-        p.cubicTo(13, 2, 15, 3, 15, 5);
-        p.lineTo(15, 11);
-        p.lineTo(16, 6);
-        p.cubicTo(17, 4, 19, 5, 18, 8);
-        p.lineTo(18, 15);
-        p.lineTo(15, 20);
-        p.lineTo(8, 20);
+        p.moveTo(8, 21);
+        p.lineTo(4, 14);
+        p.cubicTo(3, 12, 5.5, 11, 7, 13);
+        p.lineTo(7.5, 13.5);
+        p.lineTo(7.5, 5.5);
+        p.cubicTo(7.5, 3.8, 10, 3.8, 10, 5.5);
+        p.lineTo(10, 11);
+        p.lineTo(10, 3.5);
+        p.cubicTo(10, 1.8, 12.5, 1.8, 12.5, 3.5);
+        p.lineTo(12.5, 11);
+        p.lineTo(12.5, 4.5);
+        p.cubicTo(12.5, 2.8, 15, 2.8, 15, 4.5);
+        p.lineTo(15, 11.5);
+        p.lineTo(15, 7);
+        p.cubicTo(15, 5.3, 17.5, 5.3, 17.5, 7);
+        p.lineTo(17.5, 15.5);
+        p.cubicTo(17.5, 18.5, 16, 21, 15, 21);
         p.closeSubpath();
         painter.drawPath(p);
     } else if (name == "Rotate View") {
-        painter.drawArc(4, 4, 14, 14, 20 * 16, 290 * 16);
-        painter.drawPolyline(QPolygonF{{14, 2}, {19, 5}, {15, 8}});
-        painter.drawLine(8, 11, 14, 11);
-        painter.drawLine(11, 8, 11, 14);
+        curvedArrow(QRectF(4, 4, 16, 16), 110, 290);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 12), 1.6, 1.6);
+        painter.setBrush(Qt::NoBrush);
     } else if (name == "Zoom") {
-        painter.drawEllipse(3, 3, 12, 12);
-        painter.drawLine(13, 13, 20, 20);
-        painter.drawLine(6, 9, 12, 9);
-        painter.drawLine(9, 6, 9, 12);
-    } else if (name == "Ruler") {
-        painter.drawRect(3, 7, 16, 8);
-        for (int x = 6; x <= 16; x += 3)
-            painter.drawLine(x, 7, x, 11);
-    } else if (name == "Note") {
-        painter.drawPolygon(QPolygonF{{4, 3}, {18, 3}, {18, 14}, {12, 20}, {4, 20}});
-        painter.drawPolyline(QPolygonF{{12, 20}, {12, 14}, {18, 14}});
-        painter.drawLine(7, 7, 15, 7);
-        painter.drawLine(7, 10, 15, 10);
-    } else if (name == "Count") {
-        painter.drawText(QRect(2, 1, 20, 20), Qt::AlignCenter, "#");
-    } else if (name == "Magic Wand" || name == "Magic Eraser") {
-        painter.drawLine(4, 19, 16, 7);
-        painter.drawLine(13, 3, 13, 6);
-        painter.drawLine(18, 5, 21, 5);
-        painter.drawLine(17, 10, 20, 13);
-        painter.drawLine(7, 4, 9, 6);
-    } else if (name == "Red Eye") {
-        painter.drawEllipse(3, 6, 16, 10);
-        painter.drawEllipse(8, 8, 6, 6);
-    } else {
-        painter.drawRect(4, 4, 14, 14);
-        if (name == "Frame") {
-            painter.drawLine(4, 4, 18, 18);
-            painter.drawLine(18, 4, 4, 18);
-        } else if (name == "Artboard") {
-            painter.drawLine(2, 7, 6, 7);
-            painter.drawLine(4, 5, 4, 9);
+        painter.drawEllipse(QPointF(10, 10), 6.5, 6.5);
+        QPen handle = pen;
+        handle.setWidthF(2.6);
+        painter.setPen(handle);
+        painter.drawLine(QPointF(15, 15), QPointF(20.5, 20.5));
+        painter.setPen(pen);
+        badgePlus({10, 10}, true);
+    } else if (name == "ui:quick-mask") {
+        painter.drawRoundedRect(QRectF(3.75, 4.75, 16.5, 14.5), 2, 2);
+        painter.setPen(dashed);
+        painter.drawEllipse(QPointF(12, 12), 4.2, 4.2);
+    } else if (name == "ui:screen-mode") {
+        painter.drawRoundedRect(QRectF(3, 4.5, 18, 15), 2, 2);
+        painter.fillRect(QRectF(5.5, 9, 13, 8), soft);
+        painter.drawLine(QPointF(3, 7.5), QPointF(21, 7.5));
+    } else if (name == "ui:expand") {
+        painter.drawPolyline(QPolygonF{{6, 7}, {11, 12}, {6, 17}});
+        painter.drawPolyline(QPolygonF{{13, 7}, {18, 12}, {13, 17}});
+    } else if (name == "ui:collapse") {
+        painter.drawPolyline(QPolygonF{{11, 7}, {6, 12}, {11, 17}});
+        painter.drawPolyline(QPolygonF{{18, 7}, {13, 12}, {18, 17}});
+    } else if (name == "ctx:subject") {
+        painter.setPen(dashed);
+        painter.drawRoundedRect(QRectF(2.75, 2.75, 18.5, 18.5), 2, 2);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 9.5), 3.2, 3.2);
+        QPainterPath body;
+        body.moveTo(5.5, 19);
+        body.cubicTo(6, 14.5, 9, 13.5, 12, 13.5);
+        body.cubicTo(15, 13.5, 18, 14.5, 18.5, 19);
+        body.closeSubpath();
+        painter.drawPath(body);
+    } else if (name == "ctx:remove-background") {
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                if ((x + y) % 2)
+                    painter.fillRect(QRectF(3 + x * 4.5, 3 + y * 4.5, 4.5, 4.5), soft);
+        painter.drawRoundedRect(QRectF(2.75, 2.75, 18.5, 18.5), 2, 2);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 9.5), 3.2, 3.2);
+        QPainterPath body;
+        body.moveTo(5.5, 21);
+        body.cubicTo(6, 15, 9, 13.5, 12, 13.5);
+        body.cubicTo(15, 13.5, 18, 15, 18.5, 21);
+        body.closeSubpath();
+        painter.drawPath(body);
+    } else if (name == "ctx:invert") {
+        painter.setPen(dashed);
+        painter.drawRect(QRectF(3.75, 3.75, 16.5, 16.5));
+        painter.setPen(pen);
+        QPainterPath inside;
+        inside.addRect(QRectF(3.75, 3.75, 16.5, 16.5));
+        QPainterPath hole;
+        hole.addEllipse(QPointF(12, 12), 4.5, 4.5);
+        fill(inside.subtracted(hole), soft);
+        painter.drawEllipse(QPointF(12, 12), 4.5, 4.5);
+    } else if (name == "ctx:deselect") {
+        painter.setPen(dashed);
+        painter.drawRect(QRectF(3.75, 3.75, 16.5, 16.5));
+        painter.setPen(pen);
+        painter.drawLine(QPointF(9, 9), QPointF(15, 15));
+        painter.drawLine(QPointF(15, 9), QPointF(9, 15));
+    } else if (name == "pref:general") {
+        for (const auto &[y, knob] : {std::pair{6.5, 8.5}, {12.0, 15.5}, {17.5, 10.5}}) {
+            painter.drawLine(QPointF(3.5, y), QPointF(20.5, y));
+            painter.setBrush(color);
+            painter.drawEllipse(QPointF(knob, y), 2.3, 2.3);
+            painter.setBrush(Qt::NoBrush);
         }
+    } else if (name == "pref:interface") {
+        painter.fillRect(QRectF(3, 4.5, 6, 15), soft);
+        painter.drawRoundedRect(QRectF(3, 4.5, 18, 15), 2, 2);
+        painter.drawLine(QPointF(9, 4.5), QPointF(9, 19.5));
+        painter.drawLine(QPointF(12, 9), QPointF(18, 9));
+        painter.drawLine(QPointF(12, 12.5), QPointF(16, 12.5));
+    } else if (name == "pref:performance") {
+        QPainterPath dial;
+        dial.arcMoveTo(QRectF(3, 5, 18, 18), 200);
+        dial.arcTo(QRectF(3, 5, 18, 18), 200, -220);
+        painter.drawPath(dial);
+        painter.drawLine(QPointF(12, 14), QPointF(16.5, 9));
+        painter.setBrush(color);
+        painter.drawEllipse(QPointF(12, 14), 1.8, 1.8);
+        painter.setBrush(Qt::NoBrush);
+    } else if (name == "pref:export") {
+        painter.drawPolyline(QPolygonF{{4, 13.5}, {4, 19.5}, {20, 19.5}, {20, 13.5}});
+        painter.drawLine(QPointF(12, 15), QPointF(12, 4));
+        painter.drawPolyline(QPolygonF{{8, 8}, {12, 4}, {16, 8}});
+    } else if (name == "pref:ai") {
+        const auto sparkle = [](QPointF c, qreal r) {
+            QPainterPath p;
+            p.moveTo(c.x(), c.y() - r);
+            p.quadTo(c, {c.x() + r, c.y()});
+            p.quadTo(c, {c.x(), c.y() + r});
+            p.quadTo(c, {c.x() - r, c.y()});
+            p.quadTo(c, {c.x(), c.y() - r});
+            return p;
+        };
+        fill(sparkle({10, 13}, 7.5), color);
+        fill(sparkle({18, 5.5}, 3.5), color);
+    } else {
+        painter.drawRoundedRect(QRectF(4, 4, 16, 16), 2, 2);
     }
-    painter.end();
-    return QIcon(pixmap);
+    painter.restore();
+}
+// Draws the glyph as vectors at whatever size and device pixel ratio the widget requests, so
+// icons stay sharp at fractional display scaling instead of resampling a fixed bitmap.
+class GlyphIconEngine final : public QIconEngine {
+  public:
+    GlyphIconEngine(QString name, QColor color, bool corner = false)
+        : m_name(std::move(name)), m_color(std::move(color)), m_corner(corner) {}
+    void paint(QPainter *painter, const QRect &rect, QIcon::Mode mode, QIcon::State) override {
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->setRenderHint(QPainter::TextAntialiasing);
+        const qreal side = std::min(rect.width(), rect.height());
+        painter->translate(rect.x() + (rect.width() - side) / 2.0, rect.y() + (rect.height() - side) / 2.0);
+        painter->scale(side / 22.0, side / 22.0);
+        QColor color = m_color;
+        if (mode == QIcon::Disabled)
+            color.setAlphaF(color.alphaF() * 0.35);
+        QPen pen(color, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        painter->setPen(pen);
+        painter->setBrush(Qt::NoBrush);
+        paintToolGlyph(*painter, pen, m_name, color);
+        if (m_corner) {
+            // Photoshop marks tools with hidden variants by a small triangle in the corner.
+            QPainterPath triangle;
+            triangle.moveTo(22, 18.5);
+            triangle.lineTo(22, 22);
+            triangle.lineTo(18.5, 22);
+            triangle.closeSubpath();
+            painter->fillPath(triangle, color);
+        }
+        painter->restore();
+    }
+    QSize actualSize(const QSize &size, QIcon::Mode, QIcon::State) override { return size; }
+    QPixmap pixmap(const QSize &size, QIcon::Mode mode, QIcon::State state) override {
+        return scaledPixmap(size, mode, state, 1.0);
+    }
+    QPixmap scaledPixmap(const QSize &size, QIcon::Mode mode, QIcon::State state, qreal scale) override {
+        QPixmap pixmap((QSizeF(size) * scale).toSize());
+        pixmap.setDevicePixelRatio(scale);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        paint(&painter, QRect(QPoint(), size), mode, state);
+        return pixmap;
+    }
+    QIconEngine *clone() const override { return new GlyphIconEngine(m_name, m_color, m_corner); }
+    QString key() const override { return QStringLiteral("SerikaGlyph"); }
+
+  private:
+    QString m_name;
+    QColor m_color;
+    bool m_corner = false;
+};
+} // namespace
+QIcon toolIcon(const QString &name, QColor color) {
+    if (!color.isValid())
+        color = qApp ? qApp->palette().color(QPalette::Text) : QColor("#FAFAFA");
+    return QIcon(new GlyphIconEngine(name, color));
+}
+QIcon toolGroupIcon(const QString &name, QColor color) {
+    if (!color.isValid())
+        color = qApp ? qApp->palette().color(QPalette::Text) : QColor("#FAFAFA");
+    return QIcon(new GlyphIconEngine(name, color, true));
 }
 } // namespace serika

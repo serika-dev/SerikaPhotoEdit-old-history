@@ -13,5 +13,7 @@ class ActionRunner {
     static bool runFile(const QString &actionPath, const QString &inputPath, const QString &outputPath,
                         QString *error = nullptr);
     static bool load(const QString &path, QJsonArray *steps, QString *error = nullptr);
+    // Filter names accepted by {"command": "filter", "name": ...}, matched case-insensitively.
+    static QStringList filterNames();
 };
 } // namespace serika

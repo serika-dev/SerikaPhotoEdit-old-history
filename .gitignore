@@ -5,3 +5,4 @@
 *.spe.tmp
 __pycache__/
 *.log
+/.serika-workspace/

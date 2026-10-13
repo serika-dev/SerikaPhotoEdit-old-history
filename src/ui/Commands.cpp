@@ -61,6 +61,15 @@ void MainWindow::runCommand(const QString &name) {
     auto *c = currentCanvas();
     if (runTypographyCommand(name) || runProofingCommand(name))
         return;
+    if (name == "Contextual Task Bar") {
+        // Settings are the source of truth so the menu, palette and shortcuts all toggle alike.
+        const bool on = !m_settings.value("contextTaskBar", false).toBool();
+        m_settings.setValue("contextTaskBar", on);
+        m_commands[name]->setChecked(on);
+        for (auto *bar : findChildren<QFrame *>("contextBar"))
+            bar->setVisible(on);
+        return;
+    }
     if (name == "GPU Diagnostics") {
         QMessageBox::information(this, "GPU processing", GpuProcessor::instance().diagnostics().summary());
         return;
@@ -73,6 +82,12 @@ void MainWindow::runCommand(const QString &name) {
         recordStep(name);
     if (runLayerOperation(name))
         return;
+    if (runSubjectCommand(name))
+        return;
+    if (name == "Super Resolution..." || name == "Upscale Layer...") {
+        superResolution(name == "Upscale Layer...");
+        return;
+    }
     if (runSmartObjectCommand(name))
         return;
     if (name == "New...") {
@@ -774,17 +789,9 @@ void MainWindow::runCommand(const QString &name) {
         m_layers->selectAll();
         return;
     }
-    if (name == "Subject") {
-        c->selectSubject();
-        return;
-    }
     if (name == "Focus Area...") {
         d->setSelection(selectFocusAreaLocally(d->composite()));
         selectAndMask();
-        return;
-    }
-    if (name == "Remove Background") {
-        c->removeBackground();
         return;
     }
     if (name == "Select and Mask...") {

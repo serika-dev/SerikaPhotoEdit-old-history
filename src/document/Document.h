@@ -165,6 +165,11 @@ class Document : public QObject {
     QImage historyLayerImage(quint64 layerId, int historyIndex) const;
     bool restoreHistoryPixels(quint64 layerId, const QImage &coverage, int historyIndex);
     void resizeImage(QSize newSize, Qt::TransformationMode mode = Qt::SmoothTransformation);
+    // Resizes with pixels already resampled elsewhere (e.g. AI super resolution), keyed by layer id;
+    // other layers are scaled with `mode`. resizedLayerSize() gives the size each image must have.
+    void resizeImage(QSize newSize, Qt::TransformationMode mode, const QHash<quint64, QImage> &resampled,
+                     const QString &step);
+    static QSize resizedLayerSize(QSize layerSize, QSize from, QSize to);
     void resizeCanvas(QSize newSize, QPoint anchorOffset = {});
     void crop(const QRect &rect, bool deletePixels = false);
   signals:

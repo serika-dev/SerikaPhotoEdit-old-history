@@ -2,6 +2,7 @@
 #include "actions/ActionRunner.h"
 #include "compositor/GpuProcessor.h"
 #include "io/FormatIO.h"
+#include "tools/AiSegmenter.h"
 #include "tools/LocalAlgorithms.h"
 #include "ui/dialogs/CurvesEditor.h"
 #include "ui/dialogs/FillEditorDialog.h"
@@ -28,6 +29,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QLocale>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -605,124 +607,6 @@ void MainWindow::layerStyles() {
                                            {"distance", 8},
                                            {"angle", 120}};
     d->mutate("Layer styles", [d, result] { d->activeLayer()->effects = result; });
-}
-void MainWindow::preferences() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Preferences");
-    dialog.resize(740, 550);
-    auto *outer = new QVBoxLayout(&dialog);
-    auto *tabs = new QTabWidget;
-    tabs->setTabPosition(QTabWidget::West);
-    outer->addWidget(tabs, 1);
-    auto page = [&](QString name) {
-        auto *w = new QWidget;
-        auto *f = new QFormLayout(w);
-        f->setContentsMargins(20, 20, 20, 15);
-        tabs->addTab(w, name);
-        return f;
-    };
-    auto *general = page("General");
-    auto *home = new QCheckBox("Show Home at launch");
-    home->setChecked(m_settings.value("showHome", true).toBool());
-    general->addRow(home);
-    auto *recovery = new QCheckBox("Save recovery every 10 minutes");
-    recovery->setChecked(m_settings.value("recovery", true).toBool());
-    general->addRow(recovery);
-    auto *interface = page("Interface");
-    auto *theme = new QComboBox;
-    theme->addItems({"Darkest", "Dark", "Light", "Lightest"});
-    theme->setCurrentText(m_theme);
-    interface->addRow("Color theme", theme);
-    auto *scale = new QComboBox;
-    scale->addItems({"Automatic (per-monitor DPI)", "100%", "150%", "200%"});
-    interface->addRow("UI scaling", scale);
-    interface->addRow(new QLabel("Qt follows the display's DPI. Restart after changing system scale."));
-    auto *workspace = page("Workspace");
-    auto *reset = new QPushButton("Reset current workspace");
-    workspace->addRow(reset);
-    connect(reset, &QPushButton::clicked, this, [this] { setWorkspace(m_workspace, true); });
-    auto *tools = page("Tools");
-    auto *brush = new QSpinBox;
-    brush->setRange(1, 5000);
-    brush->setValue(m_options->findChild<QSpinBox *>("brushSize")->value());
-    tools->addRow("Default brush size", brush);
-    auto *history = page("History");
-    auto *states = new QSpinBox;
-    states->setRange(1, 1000);
-    states->setValue(m_settings.value("history", 50).toInt());
-    history->addRow("History states", states);
-    auto *handling = page("File Handling");
-    handling->addRow(new QLabel("Native saves are atomic. PSD import reports skipped blocks."));
-    auto *exportPage = page("Export");
-    auto *quality = new QSpinBox;
-    quality->setRange(1, 100);
-    quality->setValue(m_settings.value("jpegQuality", 92).toInt());
-    exportPage->addRow("JPEG / WebP quality", quality);
-    auto *perf = page("Performance");
-    const auto gpuInfo = GpuProcessor::instance().diagnostics();
-    auto *gpu = new QCheckBox("Use GPU for supported adjustments and blur");
-    gpu->setObjectName("gpuProcessing");
-    gpu->setChecked(GpuProcessor::instance().enabled());
-    gpu->setEnabled(gpuInfo.available || gpu->isChecked());
-    perf->addRow(gpu);
-    auto *gpuStatus = new QLabel(gpuInfo.summary());
-    gpuStatus->setWordWrap(true);
-    gpuStatus->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    perf->addRow(gpuStatus);
-    auto *linear = new QCheckBox("Blend in linear light");
-    linear->setChecked(m_settings.value("blendLinear", false).toBool());
-    perf->addRow(linear);
-    auto *memory = new QSpinBox;
-    memory->setRange(10, 90);
-    memory->setValue(70);
-    perf->addRow("Memory preference (%)", memory);
-    perf->addRow(new QLabel("CPU raster compositor · sparse 256 × 256 copy-on-write tiles"));
-    auto *scratch = new QLineEdit(
-        m_settings.value("scratch", QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
-            .toString());
-    perf->addRow("Scratch folder", scratch);
-    auto *cursors = page("Cursors");
-    auto *cursor = new QComboBox;
-    cursor->addItems({"Brush tip with crosshair", "Precise crosshair"});
-    cursors->addRow("Painting cursor", cursor);
-    auto *transparency = page("Transparency & Gamut");
-    transparency->addRow(new QLabel("8 px checkerboard · gray / light gray"));
-    auto *units = page("Units & Rulers");
-    auto *unit = new QComboBox;
-    unit->addItems({"Pixels", "Inches", "Centimeters"});
-    unit->setCurrentText(m_settings.value("units", "Pixels").toString());
-    units->addRow("Ruler units", unit);
-    auto *guides = page("Guides Grid Slices");
-    guides->addRow(new QLabel("Cyan guides · 64 px grid · drag from ruler to add guide"));
-    auto *plugins = page("Plug-ins");
-    plugins->addRow(
-        new QLabel("On-device subject selector and neural model interfaces.\nNo neural model installed."));
-    auto *technology = page("Technology Previews");
-    auto *technologyInfo =
-        new QLabel("GPU image processing is opt-in in Performance. Unsupported operations use the CPU. ICC "
-                   "CMYK proofing and export use a printer profile selected in View > Proof Setup.");
-    technologyInfo->setWordWrap(true);
-    technology->addRow(technologyInfo);
-    dialogButtons(dialog, outer);
-    if (dialog.exec() != QDialog::Accepted)
-        return;
-    applyTheme(theme->currentText());
-    m_settings.setValue("showHome", home->isChecked());
-    m_settings.setValue("recovery", recovery->isChecked());
-    m_settings.setValue("history", states->value());
-    m_settings.setValue("jpegQuality", quality->value());
-    m_settings.setValue("blendLinear", linear->isChecked());
-    m_settings.setValue("gpuProcessing", gpu->isChecked());
-    GpuProcessor::instance().setEnabled(gpu->isChecked());
-    m_settings.setValue("scratch", scratch->text());
-    m_settings.setValue("units", unit->currentText());
-    m_options->findChild<QSpinBox *>("brushSize")->setValue(brush->value());
-    for (int i = 0; i < m_tabs->count(); i++) {
-        auto *d = m_tabs->widget(i)->findChild<CanvasView *>()->document();
-        d->historyLimit = states->value();
-        d->blendLinear = linear->isChecked();
-        d->touch();
-    }
 }
 void MainWindow::exportAs() {
     auto *d = currentDocument();

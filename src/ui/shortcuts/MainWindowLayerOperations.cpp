@@ -172,29 +172,6 @@ void MainWindow::initializeLayerOperations() {
             }
             updateLayerOperationUi();
         });
-        auto *tree = static_cast<LayerTree *>(m_layers);
-        tree->orderChanged = [this] {
-            const auto selected = selectedLayerIds();
-            QTimer::singleShot(0, this, [this, selected] {
-                auto *document = currentDocument();
-                if (!document)
-                    return;
-                QVector<LayerPlacement> placements;
-                std::function<void(QTreeWidgetItem *, quint64)> walk = [&](QTreeWidgetItem *item,
-                                                                           quint64 parent) {
-                    const auto id = item->data(1, Qt::UserRole).toULongLong();
-                    for (int index = item->childCount() - 1; index >= 0; --index)
-                        walk(item->child(index), id);
-                    placements.append({id, parent});
-                };
-                for (int index = m_layers->topLevelItemCount() - 1; index >= 0; --index)
-                    walk(m_layers->topLevelItem(index), 0);
-                const auto result = applyLayerTree(document, placements, selected);
-                if (!result.error.isEmpty())
-                    showMessage(result.error);
-                selectLayerIds(result.selection);
-            });
-        };
         updateLayerOperationUi();
     });
 }

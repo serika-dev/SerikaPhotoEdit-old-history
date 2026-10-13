@@ -421,6 +421,7 @@ bool tag64(const QByteArray &key, bool psb) {
 }
 void parseTags(Reader &extra, Record &rec, bool psb, QStringList &report) {
     QJsonArray preserved;
+    QStringList unhandled;
     while (extra.left() >= 12) {
         auto signature = extra.take(4);
         if (signature != "8BIM" && signature != "8B64") {
@@ -501,20 +502,37 @@ void parseTags(Reader &extra, Record &rec, bool psb, QStringList &report) {
             if (!rec.layer.embeddedDocument.isEmpty() || !validEmbeddedDocument(data))
                 throw std::runtime_error("Invalid or duplicate Serika PSD embedded contents.");
             rec.layer.embeddedDocument = data;
-        } else if (key == "clbl" || key == "infx" || key == "knko" || key == "lclr" || key == "lnsr") {
-            preserved.append(QJsonObject{{"key", QString::fromLatin1(key)},
-                                         {"data", QString::fromLatin1(data.toBase64())}});
-            report.append("Unsupported layer tagged block " + QString::fromLatin1(key) + " on “" +
-                          rec.layer.name + "”; source bytes retained in metadata.");
         } else {
             preserved.append(QJsonObject{{"key", QString::fromLatin1(key)},
                                          {"data", QString::fromLatin1(data.toBase64())}});
-            report.append("Unsupported layer tagged block " + QString::fromLatin1(key) + " on “" +
-                          rec.layer.name + "”; raster appearance used, source bytes retained in metadata.");
+            // Blending options, colour labels, layer metadata and the like keep their default look,
+            // so they are carried silently; only blocks that change what the user sees are reported.
+            static const QSet<QByteArray> appearanceNeutral{"clbl", "infx", "knko", "lclr", "lnsr", "shmd",
+                                                            "fxrp", "lyvr", "cust", "CgEd", "lnkE", "anFX"};
+            if (!appearanceNeutral.contains(key))
+                unhandled.append(QString::fromLatin1(key));
         }
     }
     if (!preserved.isEmpty())
         rec.layer.parameters["_psdTaggedBlocks"] = preserved;
+    if (!unhandled.isEmpty()) {
+        static const QList<QPair<QStringList, QString>> features{
+            {{"PlLd", "SoLd", "SoLE", "plLd"}, "smart object"},
+            {{"lfx2", "lrFX", "lmfx", "lfxs"}, "layer effects"},
+            {{"TySh", "tySh"}, "live text"},
+            {{"vmsk", "vsms", "vscg", "vogk", "vstk"}, "vector shape"},
+            {{"SoCo", "GdFl", "PtFl"}, "fill layer"},
+            {{"FXid", "FEid", "smrt"}, "smart filters"}};
+        QStringList what;
+        for (const auto &feature : features)
+            for (const auto &key : feature.first)
+                if (unhandled.removeAll(key) && !what.contains(feature.second))
+                    what.append(feature.second);
+        if (!unhandled.isEmpty())
+            what.append("Photoshop data (" + unhandled.join(", ") + ")");
+        report.append("“" + rec.layer.name + "”: " + what.join(", ") +
+                      " imported as rendered pixels; the original data is kept for saving back to PSD.");
+    }
 }
 QVector<Record> readLayerInfo(const QByteArray &data, bool psb, int depth, int mode, QSize canvas,
                               QStringList &report) {
@@ -754,10 +772,10 @@ Document *readPsd(const QString &path, QString *error, QObject *parent) {
                     doc->state.guides.append({dir == 0, pos / 32.0});
                 }
             } else {
+                // Print settings, EXIF, IPTC, slices and similar resources are kept verbatim; none
+                // of them changes the image, so they are not worth an import warning.
                 unknownResources.append(
                     QJsonObject{{"id", id}, {"data", QString::fromLatin1(data.toBase64())}});
-                doc->importReport.append("Unsupported image resource " + QString::number(id) +
-                                         "; source bytes retained in metadata.");
             }
         }
         doc->state.metadata["_psdResources"] = unknownResources;
@@ -778,13 +796,28 @@ Document *readPsd(const QString &path, QString *error, QObject *parent) {
                 auto data = lm.take(n);
                 if (n % 4 && quint64(lm.left()) >= (4 - n % 4))
                     lm.skip(4 - n % 4);
+                // Pattern presets, smart-object source files, filter-mask settings and text engine
+                // data back features that are imported as pixels, so they need no separate warning.
+                static const QSet<QByteArray> documentNeutral{"Patt", "Pat2", "Pat3", "lnk2", "lnk3", "lnkD",
+                                                              "FMsk", "Txt2", "FEid", "FXid", "Anno", "pths"};
                 if ((key == "Lr16" && depth == 16) || (key == "Lr32" && depth == 32) || key == "Layr")
                     records = readLayerInfo(data, psb, depth, mode, doc->state.size, doc->importReport);
-                else
-                    doc->importReport.append("Unsupported document tagged block " + QString::fromLatin1(key) +
-                                             ".");
+                else if (!documentNeutral.contains(key))
+                    doc->importReport.append("Photoshop document data " + QString::fromLatin1(key) +
+                                             " is not used by Serika and was skipped.");
             }
         }
+        // Photoshop stores layer records bottom-to-top: a group's end marker comes first, then its
+        // children, then the group folder. Serika builds before 2026-10 wrote them top-to-bottom
+        // (folder first); the first group record tells the two layouts apart.
+        bool bottomUp = true;
+        for (const auto &rec : records)
+            if (rec.section >= 1 && rec.section <= 3) {
+                bottomUp = rec.section == 3;
+                break;
+            }
+        if (bottomUp)
+            std::reverse(records.begin(), records.end());
         quint64 nextId = 1;
         QSet<quint64> ids;
         for (auto &rec : records) {
@@ -936,6 +969,8 @@ bool writePsd(const Document *doc, const QString &path, QString *error) {
                 throw std::runtime_error("A layer has a missing or cyclic group parent.");
         if (records.size() > 32767)
             throw std::runtime_error("PSD supports at most 32767 layer records.");
+        // Records were gathered top-down; Photoshop expects them bottom-to-top, group end marker first.
+        std::reverse(records.begin(), records.end());
         auto absoluteOffset = [&](const Layer &l) {
             QPointF offset = l.offset;
             quint64 id = l.parentId;

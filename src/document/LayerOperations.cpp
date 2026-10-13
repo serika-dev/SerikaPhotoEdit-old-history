@@ -162,7 +162,7 @@ QRectF bounds(const Document *document, const Tree &tree, quint64 id) {
         !layer.parameters.contains("contentTransform")) {
         area = textLayerBounds(layer, document->state.size);
     } else if ((layer.kind == LayerKind::Pixel || layer.kind == LayerKind::SmartObject) &&
-        !layer.parameters.contains("contentTransform") && layer.smartFilters.isEmpty()) {
+               !layer.parameters.contains("contentTransform") && layer.smartFilters.isEmpty()) {
         for (auto it = layer.pixels.tiles.cbegin(); it != layer.pixels.tiles.cend(); ++it) {
             const QRect tileBounds = alphaBounds(it.value());
             if (!tileBounds.isEmpty()) {
@@ -620,8 +620,47 @@ LayerOperationResult reparentLayers(Document *document, const QVector<quint64> &
         tree.children[parentId].insert(index++, id);
     if (tree.children == before.children)
         return {false, roots, {}};
-    commit(document, "Move layers into group", tree, activeId(document));
+    const bool reparented = std::any_of(roots.cbegin(), roots.cend(),
+                                        [&](quint64 id) { return before.layers[id].parentId != parentId; });
+    commit(document, reparented ? "Move layers into group" : "Reorder layers", tree, activeId(document));
     return {true, roots, {}};
+}
+LayerOperationResult moveLayers(Document *document, const QVector<quint64> &ids, quint64 targetId,
+                                LayerDrop drop) {
+    if (!document)
+        return fail("Open a document first.", {});
+    if (targetId && ids.contains(targetId))
+        return {false, selectedLayerRoots(document, ids), {}};
+    const QSet<quint64> moving(ids.cbegin(), ids.cend());
+    const auto siblings = [&](quint64 parent) {
+        QVector<quint64> result; // bottom-to-top, excluding the layers being moved
+        for (const auto &layer : document->state.layers)
+            if (layer.parentId == parent && !moving.contains(layer.id))
+                result.append(layer.id);
+        return result;
+    };
+    const int targetIndex = document->indexForId(targetId);
+    const Layer *target = targetIndex >= 0 ? &document->state.layers[targetIndex] : nullptr;
+    if ((drop == LayerDrop::Above || drop == LayerDrop::Below || drop == LayerDrop::Inside) && !target)
+        return fail("The target layer does not exist.", ids);
+    quint64 parent = 0, before = 0;
+    if (drop == LayerDrop::Bottom) {
+        const auto root = siblings(0);
+        before = root.isEmpty() ? 0 : root.first();
+    } else if (drop == LayerDrop::Inside) {
+        if (!container(*target))
+            return fail("Layers can be placed only inside groups or artboards.", ids);
+        parent = targetId;
+    } else if (drop == LayerDrop::Below) {
+        parent = target->parentId;
+        before = targetId;
+    } else if (drop == LayerDrop::Above) {
+        parent = target->parentId;
+        const auto row = siblings(parent);
+        const int at = row.indexOf(targetId);
+        before = at >= 0 && at + 1 < row.size() ? row[at + 1] : 0;
+    }
+    return reparentLayers(document, ids, parent, before);
 }
 LayerOperationResult applyLayerTree(Document *document, const QVector<LayerPlacement> &placements,
                                     const QVector<quint64> &movedIds) {

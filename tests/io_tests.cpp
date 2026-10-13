@@ -610,6 +610,70 @@ class IoTests : public QObject {
         QVERIFY(sum / (64 * 64 * 3) < 5.0);
         QVERIFY(!r->state.iccProfile.isEmpty());
     }
+    void psdRecordsAreBottomToTopLikePhotoshop() {
+        // Photoshop writes layer records bottom-to-top with a group's end marker before its children.
+        // Without Serika's private ordering tags, the stack must come from that layout alone.
+        QTemporaryDir dir;
+        std::unique_ptr<Document> d(Document::create({6, 4}, Qt::white));
+        d->state.layers[0].name = "Paper";
+        Layer group;
+        group.id = 20;
+        group.kind = LayerKind::Group;
+        group.name = "Details";
+        d->state.layers.append(group);
+        Layer inside;
+        inside.id = 21;
+        inside.parentId = 20;
+        inside.name = "Inside";
+        QImage blue({6, 4}, QImage::Format_RGBA8888);
+        blue.fill(Qt::blue);
+        inside.pixels = TileImage::fromImage(blue);
+        d->state.layers.append(inside);
+        Layer top;
+        top.id = 22;
+        top.name = "Top";
+        QImage red({2, 2}, QImage::Format_RGBA8888);
+        red.fill(Qt::red);
+        top.pixels = TileImage::fromImage(red);
+        d->state.layers.append(top);
+        QString error, path = dir.filePath("photoshop-order.psd");
+        QVERIFY2(FormatIO::savePsd(d.get(), path, &error), qPrintable(error));
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        QByteArray bytes = f.readAll();
+        f.close();
+        // The first record is the bottom layer and the end marker precedes the group's children.
+        QVERIFY(bytes.indexOf("Paper") < bytes.indexOf("</Layer group>"));
+        QVERIFY(bytes.indexOf("</Layer group>") < bytes.indexOf("Inside"));
+        QVERIFY(bytes.indexOf("Inside") < bytes.indexOf("Details"));
+        QVERIFY(bytes.indexOf("Details") < bytes.indexOf("Top"));
+        for (const QByteArray key : {"8BIMsPEi", "8BIMsPEd"})
+            for (qsizetype at = bytes.indexOf(key); at >= 0; at = bytes.indexOf(key, at + 1))
+                bytes.replace(at + 4, 4, "xSkp");
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(bytes);
+        f.close();
+        std::unique_ptr<Document> r(FormatIO::openPsd(path, &error));
+        QVERIFY2(r, qPrintable(error));
+        QCOMPARE(r->state.layers.size(), 4);
+        QCOMPARE(r->state.layers[0].name, QString("Paper"));
+        QCOMPARE(r->state.layers.last().name, QString("Top"));
+        const int insideIndex = [&] {
+            for (int i = 0; i < r->state.layers.size(); ++i)
+                if (r->state.layers[i].name == "Inside")
+                    return i;
+            return -1;
+        }();
+        QVERIFY(insideIndex > 0);
+        const int groupIndex = r->indexForId(r->state.layers[insideIndex].parentId);
+        QVERIFY(groupIndex > insideIndex);
+        QCOMPARE(r->state.layers[groupIndex].name, QString("Details"));
+        QVERIFY(!r->importReport.join('\n').contains("Unmatched"));
+        // The white paper stays at the bottom: blue shows through, the red top layer is on top.
+        const QImage composite = r->composite();
+        QCOMPARE(composite.pixelColor(5, 3), QColor(Qt::blue));
+        QCOMPARE(composite.pixelColor(0, 0), QColor(Qt::red));
+    }
     void psdUnknownTaggedBlock() {
         QTemporaryDir dir;
         std::unique_ptr<Document> d(Document::create({8, 7}, Qt::blue));

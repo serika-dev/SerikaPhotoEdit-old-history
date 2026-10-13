@@ -54,6 +54,9 @@ class CanvasView : public QWidget {
     void strokeSelection(QColor color, int width);
     void selectSubject();
     void removeBackground();
+    // Apply a subject mask computed elsewhere (for example by the AI engine on a worker thread).
+    void setSubjectSelection(const QImage &mask);
+    void removeBackground(const QImage &subject);
     void contentAwareFill();
     void transformActive(qreal scale, qreal angle);
     CropSettings cropSettings() const { return m_cropSettings; }
@@ -245,4 +248,6 @@ class CanvasView : public QWidget {
 };
 QStringList toolNames();
 QIcon toolIcon(const QString &name, QColor color = QColor());
+// The tool glyph with a corner triangle marking a toolbar slot that holds more tools.
+QIcon toolGroupIcon(const QString &name, QColor color = QColor());
 } // namespace serika

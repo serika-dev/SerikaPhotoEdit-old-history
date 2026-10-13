@@ -1081,6 +1081,82 @@ QImage compositeDocument(const DocumentState &state, bool linear) {
                     }
                 continue;
             }
+            // Plain layers are painted straight onto the backdrop. The general path below would
+            // expand them to a full-canvas image, copy that, and finish with the same QPainter
+            // draw, so a small rectangle cost as much as a full-page photo. Tiles hold the same
+            // straight-alpha pixels, so the result is identical.
+            const bool rasterMask = l.maskEnabled && !l.mask.isNull();
+            const bool plain =
+                l.kind == LayerKind::Pixel && l.blendMode == "Normal" && !linear && !hasClipping &&
+                l.effects.isEmpty() && l.fill == 1 && (l.vectorMask.isEmpty() || !l.vectorMaskEnabled) &&
+                !l.parameters.contains("contentTransform") && l.offset == QPointF(l.offset.toPoint()) &&
+                (backdrop.depth() <= 32 || l.opacity == 1);
+            const QPoint origin = l.offset.toPoint();
+            // Unrotated text renders into its own bounds (grown by a margin for antialiasing and
+            // strokes) rather than a full-canvas image. The shift is whole pixels, so glyphs
+            // rasterise exactly as before.
+            const QJsonObject typography = l.parameters.value("typography").toObject();
+            if (l.kind == LayerKind::Text && l.blendMode == "Normal" && !linear && !hasClipping &&
+                l.effects.isEmpty() && l.fill == 1 && !rasterMask &&
+                (l.vectorMask.isEmpty() || !l.vectorMaskEnabled) &&
+                !l.parameters.contains("contentTransform") &&
+                l.parameters.value("rotation").toDouble() == 0 && !l.parameters.value("vertical").toBool() &&
+                typography.value("path").toArray().isEmpty() && l.offset == QPointF(origin) &&
+                (backdrop.depth() <= 32 || l.opacity == 1)) {
+                // Text is laid out in layer-local coordinates on a canvas-sized surface and then
+                // shifted by the layer offset, so crop and place exactly like that.
+                const int margin = 8 + int(std::ceil(l.strokeWidth));
+                const QRect local = textLayerBounds(l, state.size)
+                                        .toAlignedRect()
+                                        .adjusted(-margin, -margin, margin, margin)
+                                        .intersected(QRect(QPoint(), state.size));
+                if (local.isEmpty())
+                    continue;
+                QImage text = blank(local.size(), format);
+                {
+                    QPainter p(&text);
+                    p.setRenderHint(QPainter::Antialiasing);
+                    p.setRenderHint(QPainter::TextAntialiasing);
+                    p.translate(-local.topLeft());
+                    paintTextLayer(p, l, state.size);
+                }
+                QPainter painter(&backdrop);
+                painter.setOpacity(clamp(l.opacity));
+                painter.drawImage(origin + local.topLeft(), text);
+                continue;
+            }
+            if (plain && !rasterMask) {
+                QPainter painter(&backdrop);
+                painter.setOpacity(clamp(l.opacity));
+                painter.setClipRect(QRect(origin, l.pixels.size));
+                for (auto it = l.pixels.tiles.cbegin(); it != l.pixels.tiles.cend(); ++it)
+                    painter.drawImage(origin + QPoint(int(it.key() >> 32), int(quint32(it.key()))) *
+                                                   TileImage::TileSize,
+                                      it.value());
+                continue;
+            }
+            // A linked raster mask at an integer offset samples exactly one mask pixel per layer pixel,
+            // so it can be applied in the layer's own (usually small) rectangle instead of across
+            // the whole canvas. 8-bit only, matching maskLayer()'s rounding.
+            if (plain && rasterMask && l.maskLinked && l.pixels.format == QImage::Format_RGBA8888) {
+                QImage image = l.pixels.image();
+                const QImage coverage = refineMask(normalizeMask(l.mask, 8), {{"feather", l.maskFeather}});
+                const double density = std::clamp(l.maskDensity, 0., 1.);
+                for (int y = 0; y < image.height(); ++y) {
+                    uchar *line = image.scanLine(y);
+                    for (int x = 0; x < image.width(); ++x) {
+                        uchar &alpha = line[x * 4 + 3];
+                        if (alpha)
+                            alpha = uchar(qRound(
+                                clamp(alpha / 255. * (1 - density * (1 - maskSample(coverage, x, y)))) *
+                                255));
+                    }
+                }
+                QPainter painter(&backdrop);
+                painter.setOpacity(clamp(l.opacity));
+                painter.drawImage(origin, image);
+                continue;
+            }
             QImage placed = blank(state.size, format);
             const bool group = l.kind == LayerKind::Group || l.kind == LayerKind::Artboard;
             if (group) {
@@ -1094,21 +1170,27 @@ QImage compositeDocument(const DocumentState &state, bool linear) {
                     // Interpolate premultiplied results so pass-through adjustments and child
                     // blends see the actual backdrop, including at fractional group opacity.
                     const QImage mask = renderedLayerMask(l, state.size, state.bitDepth);
-                    for (int y = 0; y < backdrop.height(); ++y)
-                        for (int x = 0; x < backdrop.width(); ++x) {
-                            Pixel b = readPixel(before, x, y), a = readPixel(after, x, y);
-                            double weight = clamp(l.opacity * l.fill);
-                            if (!mask.isNull())
-                                weight *= maskValue(mask, x, y);
-                            if (l.clipped)
-                                weight *= maskValue(clip, x, y);
-                            const double alpha = b.a + (a.a - b.a) * weight;
-                            writePixel(backdrop, x, y,
-                                       {alpha ? ((1 - weight) * b.r * b.a + weight * a.r * a.a) / alpha : 0,
-                                        alpha ? ((1 - weight) * b.g * b.a + weight * a.g * a.a) / alpha : 0,
-                                        alpha ? ((1 - weight) * b.b * b.a + weight * a.b * a.a) / alpha : 0,
-                                        alpha});
-                        }
+                    // At full strength the interpolation below returns `after` itself (apart from
+                    // the unused colour of fully transparent pixels), so skip the per-pixel pass.
+                    if (clamp(l.opacity * l.fill) == 1 && mask.isNull() && !l.clipped)
+                        backdrop = after;
+                    else
+                        for (int y = 0; y < backdrop.height(); ++y)
+                            for (int x = 0; x < backdrop.width(); ++x) {
+                                Pixel b = readPixel(before, x, y), a = readPixel(after, x, y);
+                                double weight = clamp(l.opacity * l.fill);
+                                if (!mask.isNull())
+                                    weight *= maskValue(mask, x, y);
+                                if (l.clipped)
+                                    weight *= maskValue(clip, x, y);
+                                const double alpha = b.a + (a.a - b.a) * weight;
+                                writePixel(
+                                    backdrop, x, y,
+                                    {alpha ? ((1 - weight) * b.r * b.a + weight * a.r * a.a) / alpha : 0,
+                                     alpha ? ((1 - weight) * b.g * b.a + weight * a.g * a.a) / alpha : 0,
+                                     alpha ? ((1 - weight) * b.b * b.a + weight * a.b * a.a) / alpha : 0,
+                                     alpha});
+                            }
                     if (!l.clipped && hasClipping) {
                         render(l.id, placed);
                         maskLayer(placed, l, l.fill);
