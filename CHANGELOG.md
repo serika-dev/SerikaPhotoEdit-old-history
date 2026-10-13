@@ -27,7 +27,7 @@ All notable changes to Serika PhotoEdit are recorded here. The format follows
 - Brush dynamics, deterministic stroke spacing, pressure/tilt controls, stroke previews and Serika brush preset import/export.
 - Draggable RGB and per-channel Curves, histogram overlays, numeric point editing and curve presets.
 - Pattern Fill layers and five gradient styles with multiple colour/opacity stops, plus an editable Gradient Map ramp.
-- MCP layout tools for precise designs: text laid out in a box (wrapped, aligned by its ink, optionally shrunk to fit), `measure_text`, `align_layers`, `check_layout` and full-resolution `region` previews, plus layout rules in the server instructions. `inspect_document` reports every layer's ink bounds, and text layers can be restyled.
+- MCP layout tools for precise designs: text laid out in a box (wrapped or kept line by line, aligned by its ink and centred optically, optionally shrunk to fit), `measure_text`, `align_layers`, `check_layout` and full-resolution `region` previews, plus layout rules in the server instructions. `inspect_document` reports every layer's ink bounds, and text layers can be restyled.
 - `serika_iconsheet` and `serika_psdcheck` developer tools, `scripts/psd_inspect.py` and `scripts/release.py`.
 
 ### Changed

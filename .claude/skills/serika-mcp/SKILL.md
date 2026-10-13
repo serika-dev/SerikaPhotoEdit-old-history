@@ -31,7 +31,9 @@ steps because a downscaled preview "looks fine" — at 1800 px wide a 20 px erro
 
 - **Text always goes in a box.** `create_text_layer` with `box` = the region inset by padding,
   `align` (`left`/`center`/`right`), `valign` (`top`/`middle`/`bottom`) and `fit: true`. Serika
-  wraps at the box width, aligns every line, positions the real ink and shrinks the font if needed.
+  wraps at the box width, aligns every line, centres optically (cap height to baseline, so a label
+  with a "y" sits level with one without) and shrinks the font if needed. Lists and labels whose lines
+  must not break use `wrap: false`.
   Never centre with spaces, never guess `x`/`y`, never put two lines in two layers to fake alignment.
 - Labels inside pills, buttons, title bars: box = the shape's bounds, `align: center`,
   `valign: middle`.
@@ -47,8 +49,10 @@ steps because a downscaled preview "looks fine" — at 1800 px wide a 20 px erro
 
 ## 3. Verify like a print designer
 
-1. `check_layout` with `safe_areas` = your regions and `margin` = your padding. Fix **every**
-   issue (overflow, overlap, crossing a panel edge), then run it again until `ok` is true.
+1. `check_layout` with `safe_areas` = your regions and `margin` = your padding. Fix every
+   **error** (overflow, outside a safe area, overlapping text) until `ok` is true, and look at every
+   **warning** (text crossing a panel edge) in a region preview; pass `ignore_layer_ids` only for
+   deliberate decorations.
 2. `preview_document` with `region` at full resolution over **every** text block and every edge
    where art meets the template. Look for clipped glyphs, uneven padding, text touching edges,
    wrong stacking (text under a box), and low-resolution art.

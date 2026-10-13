@@ -483,6 +483,104 @@ class McpTests : public QObject {
         const auto large = data(call(server, "measure_text", {{"text", "Monika"}, {"font_size", 40}}));
         QVERIFY(large["width"].toDouble() > small["width"].toDouble() * 1.8);
     }
+    void opticalCentringListsAndQuietChecks() {
+        QTemporaryDir root;
+        McpServer server(root.path());
+        initialize(server);
+        const auto id =
+            data(call(server, "create_document",
+                      {{"width", 900}, {"height", 600}, {"background", "#ffffff"}}))["document_id"]
+                .toString();
+        const auto bounds = [&](const QString &layerId) {
+            for (const auto &value :
+                 data(call(server, "inspect_document", {{"document_id", id}}))["layers"].toArray())
+                if (value.toObject()["id"].toString() == layerId) {
+                    const auto b = value.toObject()["bounds"].toArray();
+                    return QRectF(b[0].toDouble(), b[1].toDouble(), b[2].toDouble(), b[3].toDouble());
+                }
+            return QRectF();
+        };
+        const auto label = [&](const QString &text, int x) {
+            return data(call(server, "create_text_layer",
+                             {{"document_id", id},
+                              {"text", text},
+                              {"font_family", "Arial"},
+                              {"font_size", 40},
+                              {"box", QJsonArray{x, 50, 260, 80}},
+                              {"align", "center"},
+                              {"valign", "middle"}}))["active_layer_id"]
+                .toString();
+        };
+        // A descender must not lift a label: cap tops line up across a row of buttons.
+        const QRectF player = bounds(label("1 Player", 20)), remote = bounds(label("Wii Remote", 320));
+        QVERIFY2(std::abs(player.top() - remote.top()) <= 2,
+                 qPrintable(QString("%1 vs %2").arg(player.top()).arg(remote.top())));
+        // wrap=false keeps each list line whole and shrinks instead of breaking a line.
+        const auto list = [&](bool wrap) {
+            const auto listId = data(call(server, "create_text_layer",
+                                          {{"document_id", id},
+                                           {"text", "Violence\nBlood\nSuggestive Themes\nStrong Language"},
+                                           {"font_family", "Arial"},
+                                           {"font_size", 40},
+                                           {"box", QJsonArray{20, 200, 220, 260}},
+                                           {"fit", true},
+                                           {"wrap", wrap}}))["active_layer_id"]
+                                    .toString();
+            const QRectF measured = bounds(listId);
+            if (wrap) // only one of the two variants stays, so the layout check below is meaningful
+                call(server, "delete_layers", {{"document_id", id}, {"layer_ids", QJsonArray{listId}}});
+            return measured;
+        };
+        const QRectF wrapped = list(true), whole = list(false);
+        QVERIFY(whole.width() <= 221);
+        QVERIFY(whole.height() < wrapped.height());
+        // A masked photo counts only where it shows, and a striped background is one panel.
+        QImage photo(400, 400, QImage::Format_ARGB32);
+        photo.fill(QColor("#336699"));
+        QVERIFY(photo.save(root.filePath("photo.png")));
+        const auto photoId = data(call(
+            server, "place_image",
+            {{"document_id", id}, {"path", "photo.png"}, {"x", 450}, {"y", 150}}))["active_layer_id"]
+                                 .toString();
+        call(server, "run_actions",
+             {{"document_id", id},
+              {"steps",
+               QJsonArray{QJsonObject{
+                   {"command", "rectangle"},
+                   {"parameters", QJsonObject{{"x", 450}, {"y", 150}, {"width", 200}, {"height", 100}}}}}}});
+        call(server, "add_layer_mask", {{"document_id", id}, {"layer_id", photoId}, {"from", "selection"}});
+        call(server, "run_actions",
+             {{"document_id", id}, {"steps", QJsonArray{QJsonObject{{"command", "deselect"}}}}});
+        QCOMPARE(bounds(photoId), QRectF(450, 150, 200, 100));
+        for (int band = 0; band < 3; ++band)
+            call(server, "run_actions",
+                 {{"document_id", id},
+                  {"steps",
+                   QJsonArray{
+                       QJsonObject{{"command", "new layer"}},
+                       QJsonObject{
+                           {"command", "rectangle"},
+                           {"parameters",
+                            QJsonObject{{"x", 300}, {"y", 480 + band * 30}, {"width", 580}, {"height", 30}}}},
+                       QJsonObject{{"command", "fill"}, {"parameters", QJsonObject{{"color", "#ffd0e8"}}}},
+                       QJsonObject{{"command", "deselect"}}}}});
+        call(server, "create_text_layer",
+             {{"document_id", id},
+              {"text", "Across the stripes"},
+              {"font_family", "Arial"},
+              {"font_size", 40},
+              {"box", QJsonArray{320, 485, 540, 80}},
+              {"valign", "middle"}});
+        call(server, "create_text_layer",
+             {{"document_id", id},
+              {"text", "Beside the photo"},
+              {"font_family", "Arial"},
+              {"font_size", 30},
+              {"box", QJsonArray{460, 300, 380, 60}}});
+        const auto report = data(call(server, "check_layout", {{"document_id", id}}));
+        QVERIFY2(report["ok"].toBool() && report["warnings"].toInt() == 0,
+                 QJsonDocument(report).toJson(QJsonDocument::Compact).constData());
+    }
     void liveBridgeEditsWindowDocuments() {
         // An attached session sees the window's tabs, and its edits land in those documents.
         QTemporaryDir root;
