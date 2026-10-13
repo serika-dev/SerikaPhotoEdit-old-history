@@ -1,6 +1,7 @@
 #include "McpServer.h"
 #include "actions/ActionRunner.h"
 #include "document/LayerOperations.h"
+#include "document/TextLayout.h"
 #include "document/TransformOperations.h"
 #include "io/FormatIO.h"
 #include "tools/AiSegmenter.h"
@@ -40,6 +41,16 @@ const QString ModernVersion = "2026-07-28";
 const QStringList LegacyVersions{"2025-11-25", "2025-06-18", "2025-03-26"};
 const QString MetaVersion = "io.modelcontextprotocol/protocolVersion";
 const QString MetaServerInfo = "io.modelcontextprotocol/serverInfo";
+// Shown to every client as server instructions: how to get layout right the first time.
+const QString LayoutRules =
+    "Layout rules: (1) Plan regions first and work in document pixels. (2) Put text in boxes: "
+    "create_text_layer with box, align, valign and fit=true; never centre with spaces or guessed x/y. "
+    "(3) Inset text from panel edges by padding (about 4% of the panel width). (4) Use measure_text to "
+    "pick sizes, align_layers to align anything else by its ink. (5) Images: place_image with one "
+    "dimension to keep the aspect ratio; cover a panel by overflowing it and masking (add_layer_mask "
+    "from a rectangle selection). (6) Keep a template's frame on top: put new art just above the "
+    "bottom layer. (7) Before finishing, run check_layout (with the panels as safe_areas) until it reports "
+    "no issues, then preview_document with region at full resolution for every block of text.";
 constexpr int UnsupportedProtocolVersion = -32022;
 QJsonObject serverInfo() {
     return {{"name", "serika-photoedit"}, {"version", SERIKA_VERSION}, {"title", "Serika PhotoEdit"}};
@@ -119,9 +130,93 @@ QVector<quint64> layerIdList(const QJsonObject &args, const Document *document, 
         *error = "Provide at least one layer ID.";
     return ids;
 }
-QJsonObject pngContent(const QImage &source, int dimension, QString *error) {
-    const auto image = source.scaled(dimension, dimension, Qt::KeepAspectRatio, Qt::SmoothTransformation)
-                           .convertToFormat(QImage::Format_RGBA8888);
+QJsonArray rectJson(const QRectF &rect) {
+    const auto round1 = [](qreal v) { return std::round(v * 10) / 10; };
+    return {round1(rect.x()), round1(rect.y()), round1(rect.width()), round1(rect.height())};
+}
+bool rectArgument(const QJsonValue &value, QRectF *rect) {
+    const auto a = value.toArray();
+    if (a.size() != 4)
+        return false;
+    for (const auto &v : a)
+        if (!v.isDouble() || !std::isfinite(v.toDouble()))
+            return false;
+    *rect = QRectF(a[0].toDouble(), a[1].toDouble(), a[2].toDouble(), a[3].toDouble());
+    return rect->width() > 0 && rect->height() > 0;
+}
+// Paragraph typography for text laid out in a box: the box width wraps lines and each paragraph
+// (line break) takes the alignment. One span carries the whole style.
+QJsonObject boxTypography(const QString &text, const QFont &font, const QColor &color, double tracking,
+                          double width, const QString &align, double leading) {
+    QJsonArray paragraphs;
+    for (qsizetype i = 0; i <= text.size(); ++i)
+        if (i == 0 || text[i - 1] == '\n')
+            paragraphs.append(QJsonObject{{"position", int(i)}, {"alignment", align}, {"leading", leading}});
+    return {{"version", 1},
+            {"layout", "paragraph"},
+            {"width", width},
+            {"spans", QJsonArray{QJsonObject{{"start", 0},
+                                             {"length", int(text.size())},
+                                             {"family", font.family()},
+                                             {"pixelSize", font.pixelSize()},
+                                             {"bold", font.bold()},
+                                             {"italic", font.italic()},
+                                             {"color", color.name(QColor::HexArgb)},
+                                             {"tracking", tracking}}}},
+            {"paragraphs", paragraphs}};
+}
+// Moves a layer by whole pixels so its ink bounds sit in `box` (keeping offsets integral keeps
+// text crisp and on the compositor's fast path).
+QPointF snapDelta(const QRectF &ink, const QRectF &box, const QString &align, const QString &valign) {
+    QPointF delta;
+    if (align == "left" || align == "justify")
+        delta.setX(box.left() - ink.left());
+    else if (align == "center")
+        delta.setX(box.center().x() - ink.center().x());
+    else if (align == "right")
+        delta.setX(box.right() - ink.right());
+    if (valign == "top")
+        delta.setY(box.top() - ink.top());
+    else if (valign == "middle")
+        delta.setY(box.center().y() - ink.center().y());
+    else if (valign == "bottom")
+        delta.setY(box.bottom() - ink.bottom());
+    return {std::round(delta.x()), std::round(delta.y())};
+}
+// Lays out a box text layer: wraps at the box width, shrinks the font while `fit` and the ink
+// overflows, then snaps the ink into the box. The box is stored so later edits keep it.
+void layoutBoxText(Document *document, int index) {
+    Layer &layer = document->state.layers[index];
+    const QJsonObject box = layer.parameters.value("mcpBox").toObject();
+    QRectF rect;
+    if (!rectArgument(box["rect"], &rect))
+        return;
+    const QString align = box["align"].toString("left"), valign = box["valign"].toString("top");
+    const double tracking = layer.font.letterSpacing(), leading = box["leading"].toDouble();
+    int size = std::max(1, layer.font.pixelSize());
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        layer.font.setPixelSize(size);
+        layer.parameters["typography"] =
+            boxTypography(layer.text, layer.font, layer.color, tracking, rect.width(), align, leading);
+        layer.offset = rect.topLeft();
+        const QRectF ink = layerContentBounds(document, layer.id);
+        if (!box["fit"].toBool() || ink.isEmpty() || size <= 6 ||
+            (ink.width() <= rect.width() + 0.5 && ink.height() <= rect.height() + 0.5))
+            break;
+        size = std::max(6, int(size * 0.94));
+    }
+    const QRectF ink = layerContentBounds(document, layer.id);
+    if (!ink.isEmpty())
+        layer.offset += snapDelta(ink, rect, align, valign);
+}
+QJsonObject pngContent(const QImage &source, int dimension, QString *error, bool upscale = true) {
+    // Whole-document previews scale to max_dimension; a cropped region is never upscaled, so it
+    // comes back at full resolution when it already fits.
+    const auto image =
+        (upscale || source.width() > dimension || source.height() > dimension
+             ? source.scaled(dimension, dimension, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+             : source)
+            .convertToFormat(QImage::Format_RGBA8888);
     QByteArray bytes;
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
@@ -450,6 +545,13 @@ QJsonArray McpServer::toolDefinitions(bool live) {
                              {"description", "fast: low-resource colour model. ai: local BiRefNet model "
                                              "(see ai_status). Defaults to the user's preference."}};
     const QJsonObject number{{"type", "number"}, {"minimum", -30000}, {"maximum", 30000}};
+    const QJsonObject rect{{"type", "array"},
+                           {"items", QJsonObject{{"type", "number"}}},
+                           {"minItems", 4},
+                           {"maxItems", 4},
+                           {"description", "[x, y, width, height] in document pixels."}};
+    const QJsonObject align{{"type", "string"}, {"enum", QJsonArray{"left", "center", "right", "justify"}}};
+    const QJsonObject valign{{"type", "string"}, {"enum", QJsonArray{"top", "middle", "bottom"}}};
     QJsonArray tools{
         tool("server_status", "Report capabilities, limits and the authorized workspace.", {}, {}, true),
         tool("list_documents", "List documents owned by this MCP session.", {}, {}, true),
@@ -466,8 +568,11 @@ QJsonArray McpServer::toolDefinitions(bool live) {
         tool("inspect_document",
              "Read dimensions, layer IDs/properties, precision, selection and undo state.",
              {{"document_id", doc}}, {"document_id"}, true),
-        tool("preview_document", "Render a bounded PNG preview as MCP image content without writing a file.",
-             {{"document_id", doc}, {"max_dimension", integer(32, 2048)}}, {"document_id"}, true),
+        tool("preview_document",
+             "Render a PNG of the composite. Pass region [x, y, width, height] to inspect an area at full "
+             "resolution (it is never upscaled); use it to check text and edges before calling work done.",
+             {{"document_id", doc}, {"max_dimension", integer(32, 2048)}, {"region", rect}}, {"document_id"},
+             true),
         tool("save_document",
              "Save SPE/SPEB/PSD/PSB or export a supported raster format inside the workspace. Existing files "
              "require overwrite=true.",
@@ -489,10 +594,23 @@ QJsonArray McpServer::toolDefinitions(bool live) {
               {"parameters", field("object")}},
              {"document_id", "kind"}),
         tool("create_text_layer",
-             "Create editable text with native font, tracking, color and position. Rich typography "
-             "parameters are retained by the native model.",
+             "Create editable text. Preferred: give box [x, y, w, h] with align/valign: Serika wraps the "
+             "text at "
+             "the box width, aligns every line, and positions the actual ink exactly in the box; fit=true "
+             "shrinks the font until it fits. Without a box, x/y place the top-left of the line box (glyphs "
+             "start below it by the font's internal leading).",
              {{"document_id", doc},
-              {"text", field("string")},
+              {"text", field("string", "Use \\n for line breaks.")},
+              {"name", field("string", "Layer name; defaults to the text.")},
+              {"box", rect},
+              {"align", align},
+              {"valign", valign},
+              {"fit", field("boolean", "With box: shrink the font until the text fits.")},
+              {"line_height",
+               QJsonObject{{"type", "number"},
+                           {"minimum", 0},
+                           {"maximum", 2000},
+                           {"description", "With box: fixed leading in pixels; 0 = automatic."}}},
               {"font_family", field("string")},
               {"font_size", integer(1, 2000)},
               {"bold", field("boolean")},
@@ -517,7 +635,12 @@ QJsonArray McpServer::toolDefinitions(bool live) {
               {"x", number},
               {"y", number},
               {"text", field("string", "New content for a text layer.")},
-              {"color", field("string", "Text or fill colour.")}},
+              {"color", field("string", "Text or fill colour.")},
+              {"font_family", field("string")},
+              {"font_size", integer(1, 2000)},
+              {"bold", field("boolean")},
+              {"italic", field("boolean")},
+              {"tracking", QJsonObject{{"type", "number"}, {"minimum", -100}, {"maximum", 1000}}}},
              {"document_id", "layer_id"}),
         tool("run_actions",
              "Run 1–100 native action steps atomically. Supports adjustments, filters, resize, fill, "
@@ -539,6 +662,43 @@ QJsonArray McpServer::toolDefinitions(bool live) {
              {}, {}, true),
         tool("ai_status", "Report the subject engines (fast, ai) and whether the local AI model is ready.",
              {}, {}, true),
+        tool("measure_text",
+             "Measure text before placing it: ink width/height (and offset from the layer origin) for a font "
+             "and "
+             "size, optionally wrapped at a box width. Use it to choose sizes that fit.",
+             {{"text", field("string")},
+              {"font_family", field("string")},
+              {"font_size", integer(1, 2000)},
+              {"bold", field("boolean")},
+              {"italic", field("boolean")},
+              {"tracking", QJsonObject{{"type", "number"}, {"minimum", -100}, {"maximum", 1000}}},
+              {"width", QJsonObject{{"type", "number"}, {"minimum", 1}, {"maximum", 30000}}},
+              {"align", align}},
+             {"text"}, true),
+        tool(
+            "align_layers",
+            "Align layers by their actual ink bounds to the canvas, the selection, a rect or another layer. "
+            "Moves are whole pixels and one undo step. as_group keeps the layers' relative positions.",
+            {{"document_id", doc},
+             {"layer_ids", layers},
+             {"horizontal", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"left", "center", "right"}}}},
+             {"vertical", valign},
+             {"to", QJsonObject{{"type", "string"}, {"enum", QJsonArray{"canvas", "selection"}}}},
+             {"rect", rect},
+             {"target_layer_id", layer},
+             {"as_group", field("boolean")}},
+            {"document_id", "layer_ids"}),
+        tool(
+            "check_layout",
+            "Find layout problems in visible text: outside the canvas or the given safe areas, closer than "
+            "margin to their edges, overlapping other text, or crossing the edge of a panel or box. Run it "
+            "before saving and fix every issue.",
+            {{"document_id", doc},
+             {"safe_areas", QJsonObject{{"type", "array"},
+                                        {"items", rect},
+                                        {"description", "Areas text must stay inside (e.g. cover panels)."}}},
+             {"margin", QJsonObject{{"type", "number"}, {"minimum", 0}, {"maximum", 1000}}}},
+            {"document_id"}, true),
         tool("preview_layer", "Render one layer alone as a bounded PNG, without writing a file.",
              {{"document_id", doc}, {"layer_id", layer}, {"max_dimension", integer(32, 2048)}},
              {"document_id", "layer_id"}, true),
@@ -798,6 +958,30 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                            {"adjustments", QJsonArray::fromStringList(adjustmentNames())},
                            {"filters", QJsonArray::fromStringList(ActionRunner::filterNames())},
                            {"blend_modes", QJsonArray::fromStringList(blendModeNames())}});
+    if (name == "measure_text") {
+        Layer probe;
+        probe.kind = LayerKind::Text;
+        probe.text = args["text"].toString();
+        probe.font = QFont(args["font_family"].toString("Onest"));
+        probe.font.setPixelSize(args["font_size"].toInt(48));
+        probe.font.setBold(args["bold"].toBool());
+        probe.font.setItalic(args["italic"].toBool());
+        probe.font.setLetterSpacing(QFont::AbsoluteSpacing, args["tracking"].toDouble());
+        probe.color = Qt::black;
+        if (args.contains("width"))
+            probe.parameters["typography"] =
+                boxTypography(probe.text, probe.font, probe.color, args["tracking"].toDouble(),
+                              args["width"].toDouble(), args["align"].toString("left"), 0);
+        const QRectF ink = textLayerBounds(probe, QSize(30000, 30000));
+        const QFontMetricsF metrics(probe.font);
+        return textResult({{"ink", rectJson(ink)},
+                           {"width", rectJson(ink)[2]},
+                           {"height", rectJson(ink)[3]},
+                           {"line_height", metrics.lineSpacing()},
+                           {"ascent", metrics.ascent()},
+                           {"lines", int(probe.text.count('\n')) + 1},
+                           {"note", "ink is relative to the layer origin (x/y or box top-left)."}});
+    }
     if (name == "ai_status") {
         const auto status = AiSegmenter::instance().status();
         return textResult({{"engines", QJsonArray{"fast", "ai"}},
@@ -844,8 +1028,19 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
     auto *document = m_host->document(id);
     if (!document)
         return failure("Unknown session document ID.");
-    if (name == "inspect_document")
-        return textResult(describe(id, document));
+    if (name == "inspect_document") {
+        // Ink bounds let agents place and verify layout without guessing from previews.
+        auto description = describe(id, document);
+        QJsonArray layers = description["layers"].toArray();
+        for (qsizetype i = 0; i < layers.size(); ++i) {
+            auto item = layers[i].toObject();
+            const QRectF ink = layerContentBounds(document, item["id"].toString().toULongLong());
+            item["bounds"] = ink.isEmpty() ? QJsonValue() : QJsonValue(rectJson(ink));
+            layers[i] = item;
+        }
+        description["layers"] = layers;
+        return textResult(description);
+    }
     if (name == "close_document") {
         if (!m_host->release(id, args["discard"].toBool(), &error))
             return failure(error);
@@ -874,7 +1069,18 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                 return failure("Unknown layer ID.");
             source = document->layerImage(document->state.layers[index]);
         }
-        const auto image = pngContent(source, args["max_dimension"].toInt(1024), &error);
+        if (args.contains("region")) {
+            QRectF region;
+            if (!rectArgument(args["region"], &region))
+                return failure("region must be [x, y, width, height] with a positive size.");
+            const QRect crop = region.toAlignedRect().intersected(QRect(QPoint(), source.size()));
+            if (crop.isEmpty())
+                return failure("region is outside the document.");
+            source = source.copy(crop);
+        }
+        const auto image =
+            pngContent(source, args["max_dimension"].toInt(args.contains("region") ? 2048 : 1024), &error,
+                       !args.contains("region"));
         if (image.isEmpty())
             return failure(error);
         return {{"content", QJsonArray{image}}, {"isError", false}};
@@ -947,6 +1153,48 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                     layer.text = args["text"].toString();
                 if (args.contains("color") && QColor(args["color"].toString()).isValid())
                     layer.color = QColor(args["color"].toString());
+                if (layer.kind == LayerKind::Text) {
+                    if (args.contains("font_family"))
+                        layer.font.setFamily(args["font_family"].toString());
+                    if (args.contains("font_size"))
+                        layer.font.setPixelSize(args["font_size"].toInt());
+                    if (args.contains("bold"))
+                        layer.font.setBold(args["bold"].toBool());
+                    if (args.contains("italic"))
+                        layer.font.setItalic(args["italic"].toBool());
+                    if (args.contains("tracking"))
+                        layer.font.setLetterSpacing(QFont::AbsoluteSpacing, args["tracking"].toDouble());
+                    // Box text is laid out again so it stays wrapped, fitted and aligned in its box.
+                    if (layer.parameters.contains("mcpBox"))
+                        layoutBoxText(document, index);
+                    else if (layer.parameters.contains("typography") &&
+                             (args.contains("text") || args.contains("color") ||
+                              args.contains("font_family") || args.contains("font_size") ||
+                              args.contains("bold") || args.contains("italic") ||
+                              args.contains("tracking"))) {
+                        // Other rich text: restyle its spans so the change is not masked by them.
+                        auto typography = layer.parameters["typography"].toObject();
+                        QJsonArray spans;
+                        for (const auto &value : typography["spans"].toArray()) {
+                            auto span = value.toObject();
+                            span["family"] = layer.font.family();
+                            span["pixelSize"] = layer.font.pixelSize();
+                            span.remove("size");
+                            span.remove("font");
+                            span["bold"] = layer.font.bold();
+                            span["italic"] = layer.font.italic();
+                            span["tracking"] = layer.font.letterSpacing();
+                            span["color"] = layer.color.name(QColor::HexArgb);
+                            if (typography["spans"].toArray().size() == 1) {
+                                span["start"] = 0;
+                                span["length"] = int(layer.text.size());
+                            }
+                            spans.append(span);
+                        }
+                        typography["spans"] = spans;
+                        layer.parameters["typography"] = typography;
+                    }
+                }
             });
         }
         return textResult(describe(id, document));
@@ -974,6 +1222,7 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
             layer->font.setItalic(args["italic"].toBool());
             layer->font.setLetterSpacing(QFont::AbsoluteSpacing, args["tracking"].toDouble());
             layer->offset = {args["x"].toDouble(), args["y"].toDouble()};
+            layer->name = args["name"].toString(layer->text.section('\n', 0, 0).left(48));
         } else {
             const auto kind = args["kind"].toString();
             document->addLayer(args["name"].toString(), kind == "group"           ? LayerKind::Group
@@ -984,6 +1233,20 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         }
         document->activeLayer()->color = color;
         document->activeLayer()->parameters = args["parameters"].toObject();
+        if (name == "create_text_layer" && args.contains("box")) {
+            QRectF box;
+            if (!rectArgument(args["box"], &box)) {
+                document->cancelTransaction();
+                return failure("box must be [x, y, width, height] with a positive size.");
+            }
+            document->activeLayer()->parameters["mcpBox"] =
+                QJsonObject{{"rect", rectJson(box)},
+                            {"align", args["align"].toString("left")},
+                            {"valign", args["valign"].toString("top")},
+                            {"fit", args["fit"].toBool()},
+                            {"leading", args["line_height"].toDouble()}};
+            layoutBoxText(document, document->state.activeIndex);
+        }
         if (!validDocument(document, &error)) {
             document->cancelTransaction();
             return failure(error);
@@ -1067,6 +1330,130 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
         description["engine"] = subjectEngineId(chosen);
         description["milliseconds"] = qint64(timer.elapsed());
         return textResult(description);
+    }
+    if (name == "align_layers") {
+        const auto ids = layerIdList(args, document, &error);
+        if (ids.isEmpty())
+            return failure(error);
+        QRectF target;
+        if (args.contains("rect")) {
+            if (!rectArgument(args["rect"], &target))
+                return failure("rect must be [x, y, width, height] with a positive size.");
+        } else if (args.contains("target_layer_id")) {
+            target = layerContentBounds(document, args["target_layer_id"].toString().toULongLong());
+            if (target.isEmpty())
+                return failure("The target layer has no visible content.");
+        } else if (args["to"].toString() == "selection") {
+            if (!document->hasSelection())
+                return failure("There is no selection to align to.");
+            target = document->selectionBounds();
+        } else
+            target = QRectF(QPointF(), document->state.size);
+        const QString horizontal = args["horizontal"].toString(), vertical = args["vertical"].toString();
+        if (horizontal.isEmpty() && vertical.isEmpty())
+            return failure("Give horizontal and/or vertical.");
+        QRectF group;
+        for (const auto layerId : ids)
+            group = group.united(layerContentBounds(document, layerId));
+        document->beginTransaction("Align layers");
+        for (const auto layerId : ids) {
+            const QRectF ink = args["as_group"].toBool() ? group : layerContentBounds(document, layerId);
+            if (ink.isEmpty())
+                continue;
+            const QPointF delta = snapDelta(ink, target, horizontal, vertical);
+            if (delta.isNull())
+                continue;
+            const auto moved = translateLayers(document, {layerId}, delta);
+            if (!moved.error.isEmpty()) {
+                document->cancelTransaction();
+                return failure(moved.error);
+            }
+        }
+        document->endTransaction();
+        auto description = describe(id, document);
+        QJsonArray bounds;
+        for (const auto layerId : ids)
+            bounds.append(QJsonObject{{"layer_id", QString::number(layerId)},
+                                      {"bounds", rectJson(layerContentBounds(document, layerId))}});
+        description["aligned"] = bounds;
+        return textResult(description);
+    }
+    if (name == "check_layout") {
+        QVector<QRectF> safe;
+        for (const auto &value : args["safe_areas"].toArray()) {
+            QRectF area;
+            if (!rectArgument(value, &area))
+                return failure("safe_areas must be a list of [x, y, width, height].");
+            safe.append(area);
+        }
+        const double margin = args["margin"].toDouble();
+        const QRectF canvas(QPointF(), document->state.size);
+        const auto visible = [&](const Layer &layer) {
+            if (!layer.visible)
+                return false;
+            for (quint64 parent = layer.parentId; parent;) {
+                const int at = document->indexForId(parent);
+                if (at < 0)
+                    break;
+                if (!document->state.layers[at].visible)
+                    return false;
+                parent = document->state.layers[at].parentId;
+            }
+            return true;
+        };
+        struct Item {
+            quint64 id;
+            QString name;
+            QRectF ink;
+        };
+        QVector<Item> texts, panels;
+        for (const auto &layer : document->state.layers) {
+            if (!visible(layer) || layer.kind == LayerKind::Group || layer.kind == LayerKind::Adjustment)
+                continue;
+            const QRectF ink = layerContentBounds(document, layer.id);
+            if (ink.isEmpty())
+                continue;
+            if (layer.kind == LayerKind::Text)
+                texts.append({layer.id, layer.name, ink});
+            else if (ink.width() * ink.height() < canvas.width() * canvas.height() * 0.6)
+                panels.append({layer.id, layer.name, ink});
+        }
+        QJsonArray issues;
+        const auto issue = [&](const Item &item, const QString &problem, const QString &fix) {
+            issues.append(QJsonObject{{"layer_id", QString::number(item.id)},
+                                      {"name", item.name},
+                                      {"bounds", rectJson(item.ink)},
+                                      {"problem", problem},
+                                      {"fix", fix}});
+        };
+        for (const auto &text : texts) {
+            if (!canvas.contains(text.ink))
+                issue(text, "Text extends outside the canvas.", "Move it inside or reduce its size.");
+            if (!safe.isEmpty()) {
+                const auto inside = std::any_of(safe.cbegin(), safe.cend(), [&](const QRectF &area) {
+                    return area.adjusted(margin, margin, -margin, -margin).contains(text.ink);
+                });
+                if (!inside)
+                    issue(text,
+                          margin > 0 ? "Text is outside the safe areas or within the margin of an edge."
+                                     : "Text is outside the safe areas.",
+                          "Use create_text_layer box/fit, or align_layers with rect, to bring it inside.");
+            }
+            for (const auto &other : texts)
+                if (other.id > text.id && text.ink.intersects(other.ink)) {
+                    const QRectF overlap = text.ink.intersected(other.ink);
+                    if (overlap.width() * overlap.height() > 4)
+                        issue(text, "Text overlaps “" + other.name + "”.",
+                              "Move one of them or reduce the font size.");
+                }
+            for (const auto &panel : panels)
+                if (text.ink.intersects(panel.ink) && !panel.ink.contains(text.ink) &&
+                    !text.ink.contains(panel.ink))
+                    issue(text, "Text crosses the edge of “" + panel.name + "”.",
+                          "Lay it out inside the panel with box = the panel's bounds (inset by padding).");
+        }
+        return textResult(
+            {{"ok", issues.isEmpty()}, {"checked_text_layers", int(texts.size())}, {"issues", issues}});
     }
     if (name == "add_layer_mask" || name == "delete_layer_mask") {
         bool ok = false;
@@ -1155,6 +1542,8 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                 return failure("Every action must be an object.");
         }
         document->beginTransaction("MCP action set");
+        QElapsedTimer sincePaint;
+        sincePaint.start();
         for (const auto &step : steps) {
             // Resolve defaults against the state produced by the previous step, before allocating pixels.
             if (!validActionAllocation(document, step.toObject(), &error) ||
@@ -1164,9 +1553,12 @@ QJsonObject McpServer::call(const QString &name, const QJsonObject &args) {
                 return failure(error);
             }
             // A long action list must not freeze the window it is editing (Windows reports a hung
-            // app after a few seconds). User input stays blocked so it cannot interleave.
-            if (m_host->live() && QCoreApplication::instance())
+            // app after a few seconds). Each repaint re-renders the whole document, so paint at
+            // most five times a second. User input stays blocked so it cannot interleave.
+            if (m_host->live() && QCoreApplication::instance() && sincePaint.elapsed() > 200) {
                 QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                sincePaint.restart();
+            }
         }
         document->endTransaction();
         return textResult(describe(id, document));
@@ -1203,10 +1595,13 @@ std::optional<QJsonObject> McpServer::handle(const QJsonObject &message) {
               "list_documents, "
               "then inspect_document for stable layer IDs before editing. Every edit appears on screen and "
               "can be undone by the user. Preview before saving; save native SPE for editable layers. Paths "
-              "must stay inside the configured workspace; existing files require overwrite=true."
+              "must stay inside the configured workspace; existing files require overwrite=true. " +
+                  LayoutRules
             : "Documents belong to this isolated local session. Inspect IDs before editing, preview before "
               "saving, and save native SPE for editable layers. Paths must stay inside the configured "
-              "workspace. Existing files require overwrite=true. Use list_actions for run_actions commands.";
+              "workspace. Existing files require overwrite=true. Use list_actions for run_actions "
+              "commands. " +
+                  LayoutRules;
     const QJsonObject capabilities{{"tools", QJsonObject{{"listChanged", false}}}};
     QJsonObject result;
     if (method == "server/discover") {

@@ -398,6 +398,91 @@ class McpTests : public QObject {
         QVERIFY(failed(call(server, "set_layer_properties",
                             {{"document_id", id}, {"layer_id", layer["id"].toString()}, {"text", "nope"}})));
     }
+    void layoutToolsPlaceTextExactly() {
+        QTemporaryDir root;
+        McpServer server(root.path());
+        initialize(server);
+        const auto id =
+            data(call(server, "create_document",
+                      {{"width", 800}, {"height", 600}, {"background", "#ffffff"}}))["document_id"]
+                .toString();
+        const auto layerBounds = [&](const QString &layerId) {
+            for (const auto &value :
+                 data(call(server, "inspect_document", {{"document_id", id}}))["layers"].toArray())
+                if (value.toObject()["id"].toString() == layerId) {
+                    const auto b = value.toObject()["bounds"].toArray();
+                    return QRectF(b[0].toDouble(), b[1].toDouble(), b[2].toDouble(), b[3].toDouble());
+                }
+            return QRectF();
+        };
+        // Box text: the ink is centred in the box, and the layer is named after its text.
+        const QRectF box(100, 80, 400, 120);
+        const auto centred = data(call(server, "create_text_layer",
+                                       {{"document_id", id},
+                                        {"text", "Literature Club\nPlus!"},
+                                        {"font_family", "Arial"},
+                                        {"font_size", 40},
+                                        {"box", QJsonArray{100, 80, 400, 120}},
+                                        {"align", "center"},
+                                        {"valign", "middle"}}));
+        const auto textId = centred["active_layer_id"].toString();
+        QCOMPARE(centred["layers"].toArray().last().toObject()["name"].toString(),
+                 QString("Literature Club"));
+        const QRectF ink = layerBounds(textId);
+        QVERIFY(std::abs(ink.center().x() - box.center().x()) <= 1);
+        QVERIFY(std::abs(ink.center().y() - box.center().y()) <= 1);
+        // fit shrinks an oversized line until the ink is inside the box.
+        const auto fitted = data(call(server, "create_text_layer",
+                                      {{"document_id", id},
+                                       {"text", "This line is far too long for its little box"},
+                                       {"font_family", "Arial"},
+                                       {"font_size", 120},
+                                       {"box", QJsonArray{100, 300, 300, 60}},
+                                       {"fit", true}}));
+        const QRectF fitInk = layerBounds(fitted["active_layer_id"].toString());
+        QVERIFY2(QRectF(99, 299, 302, 62).contains(fitInk), qPrintable(QString::number(fitInk.width())));
+        // Restyling box text keeps it inside its box.
+        call(server, "set_layer_properties",
+             {{"document_id", id}, {"layer_id", fitted["active_layer_id"].toString()}, {"font_size", 200}});
+        QVERIFY(QRectF(99, 299, 302, 62).contains(layerBounds(fitted["active_layer_id"].toString())));
+        // align_layers centres anything by its ink, here on the canvas.
+        call(server, "align_layers",
+             {{"document_id", id},
+              {"layer_ids", QJsonArray{textId}},
+              {"horizontal", "center"},
+              {"to", "canvas"}});
+        QVERIFY(std::abs(layerBounds(textId).center().x() - 400) <= 1);
+        // check_layout reports overlapping text and text crossing a panel edge, and passes clean layouts.
+        QVERIFY(data(call(server, "check_layout", {{"document_id", id}}))["ok"].toBool());
+        call(server, "run_actions",
+             {{"document_id", id},
+              {"steps",
+               QJsonArray{
+                   QJsonObject{{"command", "new layer"}, {"parameters", QJsonObject{{"name", "Panel"}}}},
+                   QJsonObject{
+                       {"command", "rectangle"},
+                       {"parameters", QJsonObject{{"x", 0}, {"y", 0}, {"width", 400}, {"height", 600}}}},
+                   QJsonObject{{"command", "fill"}, {"parameters", QJsonObject{{"color", "#ffc0e0"}}}},
+                   QJsonObject{{"command", "deselect"}}}}});
+        const auto report =
+            data(call(server, "check_layout",
+                      {{"document_id", id}, {"safe_areas", QJsonArray{QJsonArray{0, 0, 400, 600}}}}));
+        QVERIFY(!report["ok"].toBool());
+        const auto text = QJsonDocument(report).toJson();
+        QVERIFY(text.contains("crosses the edge"));
+        QVERIFY(text.contains("outside the safe areas"));
+        // Region previews come back at full resolution.
+        const auto region = result(call(server, "preview_document",
+                                        {{"document_id", id}, {"region", QJsonArray{100, 80, 300, 100}}}));
+        QImage crop;
+        QVERIFY(crop.loadFromData(QByteArray::fromBase64(
+            region["content"].toArray().first().toObject()["data"].toString().toLatin1())));
+        QCOMPARE(crop.size(), QSize(300, 100));
+        // measure_text grows with the font size.
+        const auto small = data(call(server, "measure_text", {{"text", "Monika"}, {"font_size", 20}}));
+        const auto large = data(call(server, "measure_text", {{"text", "Monika"}, {"font_size", 40}}));
+        QVERIFY(large["width"].toDouble() > small["width"].toDouble() * 1.8);
+    }
     void liveBridgeEditsWindowDocuments() {
         // An attached session sees the window's tabs, and its edits land in those documents.
         QTemporaryDir root;

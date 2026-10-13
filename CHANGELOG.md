@@ -27,6 +27,7 @@ All notable changes to Serika PhotoEdit are recorded here. The format follows
 - Brush dynamics, deterministic stroke spacing, pressure/tilt controls, stroke previews and Serika brush preset import/export.
 - Draggable RGB and per-channel Curves, histogram overlays, numeric point editing and curve presets.
 - Pattern Fill layers and five gradient styles with multiple colour/opacity stops, plus an editable Gradient Map ramp.
+- MCP layout tools for precise designs: text laid out in a box (wrapped, aligned by its ink, optionally shrunk to fit), `measure_text`, `align_layers`, `check_layout` and full-resolution `region` previews, plus layout rules in the server instructions. `inspect_document` reports every layer's ink bounds, and text layers can be restyled.
 - `serika_iconsheet` and `serika_psdcheck` developer tools, `scripts/psd_inspect.py` and `scripts/release.py`.
 
 ### Changed
@@ -46,6 +47,7 @@ All notable changes to Serika PhotoEdit are recorded here. The format follows
 - Dragging layers in the Layers panel could reorder unpredictably or nest layers inside non-group layers.
 - Remove Background used the whole document instead of the target layer, so a placed photo kept its background.
 - The Adjustments panel's two-letter labels were ambiguous (three buttons read "Au").
+- Editing documents with many layers was very slow: every change re-rendered each layer through full-canvas images. Plain, masked and text layers and full-strength pass-through groups now render directly, with identical pixels; a 63-layer cover dropped from about 5 seconds to 0.3 seconds per change.
 - Adding to, subtracting from or intersecting a selection on a large document took about a second per operation; long MCP action lists froze the window until Windows closed it as not responding.
 - MCP `place_image` ignored a single `width` or `height` instead of scaling proportionally.
 

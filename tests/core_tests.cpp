@@ -422,6 +422,60 @@ class CoreTests : public QObject {
         QCOMPARE(d->state.layers.size(), 1);
         QCOMPARE(d->composite().pixelColor(0, 0), QColor(Qt::red));
     }
+    void compositorFastPathsMatchTheGeneralPath() {
+        // Plain pixel, masked pixel and text layers and full-strength pass-through groups take
+        // direct paths. A disabled effect forces the general path without changing the look, so
+        // the two documents must render the same (within one 8-bit step of rounding).
+        std::unique_ptr<Document> fast(Document::create({300, 200}, QColor("#204060")));
+        Layer group;
+        group.id = 50;
+        group.kind = LayerKind::Group;
+        group.blendMode = "Pass Through";
+        fast->state.layers.append(group);
+        Layer plain;
+        plain.id = 51;
+        plain.parentId = 50;
+        QImage red({90, 60}, QImage::Format_RGBA8888);
+        red.fill(QColor(230, 40, 60, 200));
+        plain.pixels = TileImage::fromImage(red);
+        plain.offset = {20, 30};
+        plain.opacity = 0.7;
+        fast->state.layers.append(plain);
+        Layer masked;
+        masked.id = 52;
+        QImage green({280, 150}, QImage::Format_RGBA8888);
+        green.fill(QColor(40, 200, 90, 255));
+        masked.pixels = TileImage::fromImage(green);
+        masked.offset = {10, 25};
+        masked.mask = QImage({280, 150}, QImage::Format_Grayscale8);
+        for (int y = 0; y < 150; ++y)
+            for (int x = 0; x < 280; ++x)
+                masked.mask.scanLine(y)[x] = uchar((x * 255) / 279);
+        masked.maskDensity = 0.8;
+        fast->state.layers.append(masked);
+        Layer text;
+        text.id = 53;
+        text.kind = LayerKind::Text;
+        text.text = "Literature Club";
+        text.font = QFont("Arial");
+        text.font.setPixelSize(30);
+        text.color = QColor("#fff0f8");
+        text.offset = {40, 120};
+        fast->state.layers.append(text);
+        std::unique_ptr<Document> general(Document::create({300, 200}, QColor("#204060")));
+        general->state.layers = fast->state.layers;
+        for (auto &layer : general->state.layers)
+            if (layer.kind != LayerKind::Group)
+                layer.effects = QJsonObject{{"dropShadow", QJsonObject{{"enabled", false}}}};
+        const QImage a = fast->composite().convertToFormat(QImage::Format_RGBA8888);
+        const QImage b = general->composite().convertToFormat(QImage::Format_RGBA8888);
+        QCOMPARE(a.size(), b.size());
+        int worst = 0;
+        for (int y = 0; y < a.height(); ++y)
+            for (int x = 0; x < a.width() * 4; ++x)
+                worst = std::max(worst, std::abs(int(a.constScanLine(y)[x]) - int(b.constScanLine(y)[x])));
+        QVERIFY2(worst <= 1, qPrintable(QString("largest channel difference %1").arg(worst)));
+    }
     void resizeCanvasCropAndImage() {
         std::unique_ptr<Document> d(Document::create({4, 4}, Qt::transparent));
         d->activeLayer()->pixels.paint({1, 1, 1, 1},

@@ -34,6 +34,14 @@ the `SerikaPhotoEdit` launcher. Configure your MCP client to launch the command 
 argument array shown in [the example configuration](../examples/serika-photoedit.mcp.json). The
 client manages stdin/stdout; do not wrap it in a shell command string.
 
+## Layout guidance
+
+Every session receives layout rules in the server instructions: put text in boxes with
+`align`/`valign`/`fit`, align by ink, inset from panel edges, then run `check_layout` with the
+panels as `safe_areas` and inspect each text block with a full-resolution `region` preview before
+finishing. The project skill `.claude/skills/serika-mcp/SKILL.md` expands this into a complete
+design workflow.
+
 ## Protocol
 
 Serika speaks **2026-07-28** and the earlier handshake revisions **2025-11-25, 2025-06-18 and
@@ -53,10 +61,11 @@ stdout carries only protocol messages and diagnostics go to stderr.
 | `server_status`, `list_documents` | Workspace, limits, protocol versions, session kind; documents with the active one marked |
 | `create_document`, `open_document`, `close_document`, `focus_document` | RGB documents at 8, 16 or 32 bits; close with unsaved edits needs `discard: true`; focus is live-only |
 | `inspect_document`, `history` | Stable document/layer IDs, hierarchy, appearance, selection bounds and undo state |
-| `preview_document`, `preview_layer` | PNG image content of the composite or one layer, 32–2048 pixels on the longest edge |
+| `preview_document`, `preview_layer` | PNG image content of the composite or one layer, 32–2048 pixels on the longest edge; `region` crops at full resolution |
 | `save_document` | Editable SPE/SPEB, compatible PSD/PSB, or flattened raster export |
 | `select_layer`, `set_layer_properties` | Active layer; name, opacity, fill, visibility, blend mode, lock, position, text and colour |
-| `add_layer`, `create_text_layer`, `place_image` | Pixel/group/fill/text layers; an image file from the workspace as a positioned, scaled layer |
+| `add_layer`, `create_text_layer`, `place_image` | Pixel/group/fill/text layers; text in a `box` wraps, aligns its ink exactly and can `fit`; an image file from the workspace as a positioned, scaled layer |
+| `measure_text`, `align_layers`, `check_layout` | Ink size of text before placing it; align layers by ink to the canvas, selection, a rect or a layer; report text overflowing safe areas, overlapping other text or crossing panel edges |
 | `duplicate_layers`, `delete_layers`, `group_layers`, `ungroup_layers`, `move_layers` | Multi-layer operations by ID; `move_layers` places above/below/inside a target or at the top/bottom |
 | `select_subject`, `remove_background`, `ai_status` | Fast or local AI engine; background removal masks the target layer from its own pixels ([details](AI-BACKGROUND-REMOVAL.md)) |
 | `add_layer_mask`, `delete_layer_mask` | Reveal-all, hide-all or selection masks; delete or apply |
