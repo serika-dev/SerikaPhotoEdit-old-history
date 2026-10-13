@@ -1,48 +1,75 @@
-# Local MCP server
+# MCP server
 
-Serika PhotoEdit includes a native stdio Model Context Protocol server. It uses the
-same document, compositor, actions and file-format code as the editor. Each client
-connection owns isolated in-memory documents; it does not control existing GUI tabs.
-No network listener, model account or additional runtime is needed.
+Serika PhotoEdit includes a native stdio [Model Context Protocol](https://modelcontextprotocol.io)
+server. It uses the same document, compositor, actions and file-format code as the editor. No
+network listener, model account or extra runtime is needed.
 
-Start the installed executable with an existing folder dedicated to your work:
+## Live sessions: edit what is on screen
+
+```powershell
+SerikaPhotoEdit.exe --mcp --attach --mcp-root "C:/Pictures/SerikaWorkspace"
+```
+
+`--attach` connects the MCP client to the running Serika window (starting it if needed; add
+`--no-launch` to fail instead). The agent's documents are the window's open tabs: every edit appears
+immediately, joins the normal undo history, and the title bar shows **AI agent connected** while a
+session is attached. Agents can create or open documents (each gets a tab) and bring one to the
+front with `focus_document`. Closing a tab with unsaved edits requires `discard: true`, so an agent
+never triggers a Save prompt. The bridge listens on a per-user local socket (a named pipe on
+Windows) restricted to the current user; turn it off in Preferences › AI.
+
+In this repository, [`.mcp.json`](../.mcp.json) registers the live server for Claude Code through
+[`scripts/serika-mcp.py`](../scripts/serika-mcp.py), which finds the local build and uses
+`.serika-workspace/` as the file workspace. Set `SERIKA_MCP_MODE=isolated` for an isolated session.
+
+## Isolated sessions
 
 ```powershell
 SerikaPhotoEdit.exe --mcp --mcp-root "C:/Pictures/SerikaWorkspace"
 ```
 
-On macOS, use `SerikaPhotoEdit.app/Contents/MacOS/SerikaPhotoEdit`. Linux packages
-provide the `SerikaPhotoEdit` launcher. Configure your MCP client to launch the
-command directly with the argument array shown in
-[the example configuration](../examples/serika-photoedit.mcp.json). Replace both
-absolute paths for your installation. The client manages stdin/stdout; do not
-launch a second GUI wrapper or shell command string around it.
+Without `--attach`, each client connection owns private in-memory documents that never appear in a
+window. On macOS, use `SerikaPhotoEdit.app/Contents/MacOS/SerikaPhotoEdit`; Linux packages provide
+the `SerikaPhotoEdit` launcher. Configure your MCP client to launch the command directly with the
+argument array shown in [the example configuration](../examples/serika-photoedit.mcp.json). The
+client manages stdin/stdout; do not wrap it in a shell command string.
 
-The server implements initialization, ping, tools/list and tools/call, with
-protocol negotiation for 2025-11-25, 2025-06-18 and 2025-03-26. Messages are
-newline-delimited UTF-8 JSON-RPC. Stdout contains only protocol messages;
-diagnostics go to stderr. Notifications do not produce responses or execute edits.
+## Protocol
+
+Serika speaks **2026-07-28** and the earlier handshake revisions **2025-11-25, 2025-06-18 and
+2025-03-26** (a dual-era server). Modern clients send no handshake: every request carries
+`io.modelcontextprotocol/protocolVersion` (and optionally client info and capabilities) in
+`params._meta`; `server/discover` reports supported versions, capabilities and instructions; an
+unsupported version returns error `-32022` listing the supported ones. Every result carries
+`resultType: "complete"` and `io.modelcontextprotocol/serverInfo` in `_meta`; `tools/list` and
+`server/discover` include `ttlMs`/`cacheScope`. Older clients use `initialize`,
+`notifications/initialized` and `ping` as before. Messages are newline-delimited UTF-8 JSON-RPC;
+stdout carries only protocol messages and diagnostics go to stderr.
 
 ## Tools
 
 | Tool | Behavior |
 | --- | --- |
-| `server_status`, `list_documents` | Workspace, limits, capabilities and session documents |
-| `create_document`, `open_document`, `close_document` | RGB documents at 8, 16 or 32 bits; close with unsaved edits needs `discard: true` |
-| `inspect_document` | Stable document/layer IDs, hierarchy, appearance, parameters and undo state |
-| `preview_document` | Composite PNG image content, bounded to 32–2048 pixels on the longest edge |
+| `server_status`, `list_documents` | Workspace, limits, protocol versions, session kind; documents with the active one marked |
+| `create_document`, `open_document`, `close_document`, `focus_document` | RGB documents at 8, 16 or 32 bits; close with unsaved edits needs `discard: true`; focus is live-only |
+| `inspect_document`, `history` | Stable document/layer IDs, hierarchy, appearance, selection bounds and undo state |
+| `preview_document`, `preview_layer` | PNG image content of the composite or one layer, 32–2048 pixels on the longest edge |
 | `save_document` | Editable SPE/SPEB, compatible PSD/PSB, or flattened raster export |
-| `select_layer`, `set_layer_properties` | Active layer, name, opacity, visibility and blend mode |
-| `add_layer`, `create_text_layer` | Editable pixel/group/fill/text content, including native typography parameters |
-| `run_actions` | 1–100 native action steps in one undoable transaction; failure restores the before-state |
-| `undo`, `redo` | Session edit history |
+| `select_layer`, `set_layer_properties` | Active layer; name, opacity, fill, visibility, blend mode, lock, position, text and colour |
+| `add_layer`, `create_text_layer`, `place_image` | Pixel/group/fill/text layers; an image file from the workspace as a positioned, scaled layer |
+| `duplicate_layers`, `delete_layers`, `group_layers`, `ungroup_layers`, `move_layers` | Multi-layer operations by ID; `move_layers` places above/below/inside a target or at the top/bottom |
+| `select_subject`, `remove_background`, `ai_status` | Fast or local AI engine; background removal masks the target layer from its own pixels ([details](AI-BACKGROUND-REMOVAL.md)) |
+| `add_layer_mask`, `delete_layer_mask` | Reveal-all, hide-all or selection masks; delete or apply |
+| `run_actions`, `list_actions` | 1–100 native action steps in one undoable transaction; `list_actions` documents every command with a tested example |
+| `undo`, `redo` | Edit history |
 
 Use the returned IDs instead of guessing layer indices. Save SPE as the editable
 master; exporting a raster or PSD does not mark the native document saved. Call
 `preview_document` to inspect work before saving. No writes occur merely because
 a document was created or edited. Existing files require `overwrite: true`.
 
-Action steps follow [the action format](../examples/web-export.speaction):
+Call `list_actions` for the full command catalog. Action steps follow
+[the action format](../examples/web-export.speaction):
 
 ```json
 {"document_id":"<returned-id>","steps":[

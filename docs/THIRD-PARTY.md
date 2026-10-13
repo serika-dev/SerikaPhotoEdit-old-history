@@ -13,6 +13,8 @@ Linux/macOS packages use the same Qt 6.8.3 source notices, plus notices for the 
 | zlib | 1.3.1 | zlib license; [source](https://zlib.net/fossils/zlib-1.3.1.tar.gz) |
 | MinGW GCC runtime | GCC 13.1 | GPL-3.0 with GCC Runtime Library Exception; [GCC sources](https://gcc.gnu.org/releases.html) |
 | Image codecs | Supplied by Qt's image plugins | libjpeg-turbo 3.1.0, libpng 1.6.47, libtiff 4.7.0 and libwebp 1.5.0; exact Qt 6.8.3 notices are bundled |
+| ONNX Runtime | 1.20.1 (optional; Windows builds ship `onnxruntime.dll`) | MIT; [source](https://github.com/microsoft/onnxruntime/tree/v1.20.1); `ONNXRuntime.txt` bundled. Loaded at runtime only for AI background removal; its C API header is vendored in `third_party/onnxruntime` |
+| BiRefNet lite model | Downloaded on request, never bundled | MIT; [model card](https://huggingface.co/onnx-community/BiRefNet_lite-ONNX), [BiRefNet](https://github.com/ZhengPeng7/BiRefNet). Verified by SHA-256 after download |
 | PDFium and Chromium support code | Qt PDF 6.8.3 source snapshot | PDFium BSD/Apache-2.0 and Chromium BSD notices, plus their bundled dependency notices |
 
 License texts are included in `resources/licenses` and installed under `share/serika-photoedit/licenses`. `Qt-6.8.3-THIRD-PARTY-NOTICES.txt` retains 53 upstream attribution entries and their license texts from the Qt Base, Qt SVG and Qt Image Formats v6.8.3 source tags. It includes conditionally compiled platform code, so some entries are inactive in a particular build.
